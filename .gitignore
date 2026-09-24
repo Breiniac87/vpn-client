@@ -17,3 +17,4 @@ Package.resolved
 *.o
 *.swp
 *~
+FEATURE_REGISTRY.md
