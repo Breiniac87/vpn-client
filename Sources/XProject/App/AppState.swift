@@ -71,6 +71,10 @@ public final class AppState {
     public var bytesOut: UInt64 = 0
     public var logs: [LogEntry] = []
     
+    // MARK: - Exit IP & Geolocation
+    public var exitIpInfo: ExitIpInfo? = nil
+    public var isCheckingExitIp: Bool = false
+    
     // Internal Timer
     private var telemetryTimer: Timer?
     
@@ -183,20 +187,12 @@ public final class AppState {
             self.startTelemetryTimer()
             self.appendLog(level: .info, message: "Туннель Xray-core успешно поднят на локальных портах SOCKS:\(settings.socksPort), HTTP:\(settings.httpPort)")
             
-            // Fast live connectivity verification to ensure traffic really routes through the node
-            let httpPort = settings.httpPort
-            let srvName = server.name
+            // Fast live connectivity verification & Exit IP geo detection
             Task { [weak self] in
                 guard let self = self else { return }
                 try? await Task.sleep(nanoseconds: 1_200_000_000)
                 guard self.connectionStatus == .connected else { return }
-                
-                let check = await self.checkLiveProxyReachability(httpPort: httpPort)
-                if let exitIp = check.exitIp {
-                    self.appendLog(level: .info, message: "✅ Туннель подтвержден! Внешний выходной IP: \(exitIp)")
-                } else if self.connectionStatus == .connected {
-                    self.appendLog(level: .warning, message: "⚠️ Внимание: Сервер '\(srvName)' не ответил на сетевое рукопожатие (таймаут ноды). Проверьте интернет или переключитесь на рабочий сервер (например, Швеция).")
-                }
+                await self.fetchExitIpInfo()
             }
         } catch {
             self.connectionStatus = .error(error.localizedDescription)
@@ -228,6 +224,8 @@ public final class AppState {
         self.connectionStatus = .disconnected
         self.connectedSince = nil
         self.uptimeSeconds = 0
+        self.exitIpInfo = nil
+        self.isCheckingExitIp = false
         self.appendLog(level: .info, message: "Сетевые параметры сброшены. Соединение разорвано.")
     }
     
@@ -239,6 +237,8 @@ public final class AppState {
             // Only disable proxy if Kill Switch is off; if on, keep blackhole active
             SystemProxyManager.shared.disableProxy()
         }
+        self.exitIpInfo = nil
+        self.isCheckingExitIp = false
         self.connectionStatus = .error("Сбой ядра (код \(code))")
     }
     
@@ -833,6 +833,72 @@ public final class AppState {
                     }
                 } catch {}
                 continuation.resume(returning: (false, nil))
+            }
+        }
+    }
+    
+    /// Запрашивает Cloudflare Trace через туннель для определения внешнего IP и страны выхода
+    public func fetchExitIpInfo() async {
+        guard connectionStatus == .connected else { return }
+        let httpPort = settings.httpPort
+        
+        await MainActor.run {
+            self.isCheckingExitIp = true
+        }
+        
+        let result: ExitIpInfo? = await withCheckedContinuation { continuation in
+            DispatchQueue.global(qos: .userInitiated).async {
+                let process = Process()
+                process.executableURL = URL(fileURLWithPath: "/usr/bin/curl")
+                process.arguments = [
+                    "-s",
+                    "-m", "4",
+                    "-x", "http://127.0.0.1:\(httpPort)",
+                    "https://1.1.1.1/cdn-cgi/trace"
+                ]
+                let pipe = Pipe()
+                process.standardOutput = pipe
+                
+                do {
+                    try process.run()
+                    process.waitUntilExit()
+                    if process.terminationStatus == 0 {
+                        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+                        if let output = String(data: data, encoding: .utf8) {
+                            var ipVal: String?
+                            var locVal: String?
+                            
+                            let lines = output.components(separatedBy: "\n")
+                            for line in lines {
+                                let parts = line.split(separator: "=", maxSplits: 1).map(String.init)
+                                if parts.count == 2 {
+                                    let key = parts[0].trimmingCharacters(in: .whitespaces)
+                                    let val = parts[1].trimmingCharacters(in: .whitespaces)
+                                    if key == "ip" { ipVal = val }
+                                    if key == "loc" { locVal = val }
+                                }
+                            }
+                            
+                            if let ip = ipVal, !ip.isEmpty, let loc = locVal, !loc.isEmpty {
+                                let info = ExitIpInfo(ip: ip, countryCode: loc)
+                                continuation.resume(returning: info)
+                                return
+                            }
+                        }
+                    }
+                } catch {}
+                
+                continuation.resume(returning: nil)
+            }
+        }
+        
+        await MainActor.run {
+            self.isCheckingExitIp = false
+            if let info = result {
+                self.exitIpInfo = info
+                self.appendLog(level: .info, message: "🌍 Внешний узел подтверждён: \(info.flagEmoji) \(info.countryName) (\(info.ip))")
+            } else if self.connectionStatus == .connected {
+                self.appendLog(level: .warning, message: "⚠️ Не удалось определить внешний IP через ноду.")
             }
         }
     }

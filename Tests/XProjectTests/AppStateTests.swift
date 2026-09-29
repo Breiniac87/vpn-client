@@ -163,5 +163,93 @@ final class AppStateTests: XCTestCase {
         XCTAssertEqual(appState.selectedServer?.id, original.id)
         XCTAssertEqual(appState.selectedServer?.name, "Updated VLESS Reality NL")
     }
+    
+    func testExitIpInfoModelCreation() {
+        let nl = ExitIpInfo(ip: "185.220.101.5", countryCode: "NL")
+        XCTAssertEqual(nl.ip, "185.220.101.5")
+        XCTAssertEqual(nl.countryCode, "NL")
+        XCTAssertEqual(nl.flagEmoji, "🇳🇱")
+        XCTAssertFalse(nl.countryName.isEmpty)
+        
+        let us = ExitIpInfo(ip: "1.1.1.1", countryCode: "us")
+        XCTAssertEqual(us.countryCode, "US")
+        XCTAssertEqual(us.flagEmoji, "🇺🇸")
+        
+        // Codable serialization test
+        let encoder = JSONEncoder()
+        let decoder = JSONDecoder()
+        XCTAssertNoThrow({
+            let data = try encoder.encode(nl)
+            let decoded = try decoder.decode(ExitIpInfo.self, from: data)
+            XCTAssertEqual(decoded, nl)
+            XCTAssertEqual(decoded.flagEmoji, "🇳🇱")
+        })
+    }
+    
+    @MainActor
+    func testAppStateExitIpInfoLifecycle() {
+        let appState = AppState()
+        XCTAssertNil(appState.exitIpInfo)
+        XCTAssertFalse(appState.isCheckingExitIp)
+        
+        // Simulate setting exitIpInfo while connected
+        appState.connectionStatus = .connected
+        appState.exitIpInfo = ExitIpInfo(ip: "194.26.29.112", countryCode: "SE")
+        appState.isCheckingExitIp = true
+        
+        XCTAssertNotNil(appState.exitIpInfo)
+        XCTAssertEqual(appState.exitIpInfo?.flagEmoji, "🇸🇪")
+        
+        // Disconnecting must completely purge exitIpInfo and reset checking flag
+        appState.disconnect()
+        XCTAssertNil(appState.exitIpInfo)
+        XCTAssertFalse(appState.isCheckingExitIp)
+    }
+    
+    func testCloudflareTraceParsingLogic() {
+        let sampleTrace = """
+        fl=71f112
+        h=1.1.1.1
+        ip=185.220.101.5
+        ts=1727623700.123
+        visit_scheme=https
+        uag=curl/8.7.1
+        colo=AMS
+        sliver=none
+        http=http/2
+        loc=NL
+        tls=TLSv1.3
+        sni=plaintext
+        warp=off
+        gateway=off
+        rbi=off
+        kex=X25519
+        """
+        
+        var ipVal: String?
+        var locVal: String?
+        let lines = sampleTrace.components(separatedBy: "\n")
+        for line in lines {
+            let parts = line.split(separator: "=", maxSplits: 1).map(String.init)
+            if parts.count == 2 {
+                let key = parts[0].trimmingCharacters(in: .whitespaces)
+                let val = parts[1].trimmingCharacters(in: .whitespaces)
+                if key == "ip" { ipVal = val }
+                if key == "loc" { locVal = val }
+            }
+        }
+        
+        XCTAssertEqual(ipVal, "185.220.101.5")
+        XCTAssertEqual(locVal, "NL")
+        
+        if let ip = ipVal, let loc = locVal {
+            let info = ExitIpInfo(ip: ip, countryCode: loc)
+            XCTAssertEqual(info.ip, "185.220.101.5")
+            XCTAssertEqual(info.countryCode, "NL")
+            XCTAssertEqual(info.flagEmoji, "🇳🇱")
+        } else {
+            XCTFail("Failed to parse trace parameters")
+        }
+    }
 }
 
