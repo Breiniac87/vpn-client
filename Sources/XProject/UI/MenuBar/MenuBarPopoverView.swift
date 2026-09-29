@@ -96,6 +96,60 @@ public struct MenuBarPopoverView: View {
             .padding(.vertical, 2)
             
             
+            // MARK: - Subscription Banner (Happ Style)
+            if let activeSub = appState.subscriptions.first {
+                VStack(alignment: .leading, spacing: 4) {
+                    HStack(spacing: 6) {
+                        Image(systemName: "antenna.radiowaves.left.and.right")
+                            .font(.system(size: 10, weight: .bold))
+                            .foregroundStyle(ModernMacTheme.cyanAccent)
+                        
+                        Text(activeSub.name)
+                            .font(.system(size: 11, weight: .semibold))
+                            .foregroundStyle(.white.opacity(0.9))
+                            .lineLimit(1)
+                        
+                        Spacer()
+                        
+                        Button(action: {
+                            Task {
+                                await SubscriptionManager.shared.updateAllSubscriptions(in: appState)
+                            }
+                        }) {
+                            Image(systemName: "arrow.clockwise")
+                                .font(.system(size: 10))
+                                .foregroundStyle(.white.opacity(0.6))
+                        }
+                        .buttonStyle(.plain)
+                        .help("Обновить подписку")
+                    }
+                    
+                    HStack {
+                        if !activeSub.formattedTraffic.isEmpty {
+                            Text(activeSub.formattedTraffic)
+                                .font(.system(size: 9, weight: .medium, design: .monospaced))
+                                .foregroundStyle(.white.opacity(0.6))
+                        }
+                        Spacer()
+                        if !activeSub.formattedExpireDate.isEmpty {
+                            Text(activeSub.formattedExpireDate)
+                                .font(.system(size: 9, weight: .medium))
+                                .foregroundStyle(activeSub.isExpired ? .red.opacity(0.85) : ModernMacTheme.cyanAccent)
+                        }
+                    }
+                }
+                .padding(.horizontal, 10)
+                .padding(.vertical, 7)
+                .background(
+                    RoundedRectangle(cornerRadius: 8, style: .continuous)
+                        .fill(Color.white.opacity(0.04))
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                                .strokeBorder(Color.white.opacity(0.08), lineWidth: 0.6)
+                        )
+                )
+            }
+            
             // MARK: - Direct Interactive Server Selector
             VStack(alignment: .leading, spacing: 6) {
                 HStack {

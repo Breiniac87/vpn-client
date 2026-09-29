@@ -128,4 +128,31 @@ public final class SystemProxyManager: @unchecked Sendable {
             return false
         }
     }
+    
+    // MARK: - Kill Switch (Fail-Closed Traffic Blackhole)
+    
+    /// Activates Kill Switch by pointing all proxies to a dead blackhole port (127.0.0.1:1).
+    /// This ensures no traffic can leak to the internet with the real IP when the VPN tunnel drops.
+    /// The proxy is set to a non-listening port, so all outbound connections are refused.
+    public func enableKillSwitchBlackhole() {
+        lock.lock()
+        defer { lock.unlock() }
+        
+        let services = getActiveNetworkServices()
+        for service in services {
+            // Set SOCKS proxy to dead port
+            runNetworkSetup(arguments: ["-setsocksfirewallproxy", service, "127.0.0.1", "1"])
+            runNetworkSetup(arguments: ["-setsocksfirewallproxystate", service, "on"])
+            
+            // Set HTTP proxy to dead port
+            runNetworkSetup(arguments: ["-setwebproxy", service, "127.0.0.1", "1"])
+            runNetworkSetup(arguments: ["-setwebproxystate", service, "on"])
+            
+            // Set HTTPS proxy to dead port
+            runNetworkSetup(arguments: ["-setsecurewebproxy", service, "127.0.0.1", "1"])
+            runNetworkSetup(arguments: ["-setsecurewebproxystate", service, "on"])
+            
+            modifiedServices.insert(service)
+        }
+    }
 }

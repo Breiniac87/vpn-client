@@ -6,6 +6,8 @@ import UniformTypeIdentifiers
 public final class ImportCoordinator {
     public static let shared = ImportCoordinator()
     
+    private var inFlightUrls = Set<String>()
+    
     private init() {}
     
     /// Import from macOS system clipboard (supports vless, trojan, ss, Base64, raw JSON, and http/https subscription URLs)
@@ -58,16 +60,28 @@ public final class ImportCoordinator {
     /// Imports a subscription from an HTTP/HTTPS URL
     public func importSubscriptionUrl(_ urlString: String, into appState: AppState) {
         let trimmedUrl = urlString.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedUrl.isEmpty else { return }
+        let canonical = Subscription.normalizeUrl(trimmedUrl)
         
-        // Deduplicate subscription if already present
+        // Prevent concurrent identical imports
+        if inFlightUrls.contains(canonical) {
+            appState.appendLog(level: .info, message: "Подписка уже загружается, повторный запрос пропущен.")
+            return
+        }
+        inFlightUrls.insert(canonical)
+        
+        // Deduplicate subscription if already present by canonical URL or mirror
         let existingSub = appState.subscriptions.first(where: {
-            $0.urlString.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() == trimmedUrl.lowercased()
+            $0.isSameSubscription(as: trimmedUrl)
         })
         let subId = existingSub?.id ?? UUID()
         
         appState.appendLog(level: .info, message: "Загрузка подписки по URL: \(trimmedUrl)...")
         
         Task { @MainActor in
+            defer {
+                self.inFlightUrls.remove(canonical)
+            }
             do {
                 let result = try await SubscriptionManager.shared.fetchSubscriptionWithUserInfo(from: trimmedUrl, subscriptionId: subId)
                 guard !result.servers.isEmpty else {
@@ -88,51 +102,19 @@ public final class ImportCoordinator {
                     effectiveName = "Подписка #\(appState.subscriptions.count + 1)"
                 }
                 
-                // Remove existing servers belonging to this subscription to prevent duplicates
-                appState.servers.removeAll(where: { $0.subscriptionId == subId })
-                
-                if let existingIndex = appState.subscriptions.firstIndex(where: { $0.id == subId }) {
-                    if let candidate = titleCandidate, !candidate.isEmpty {
-                        appState.subscriptions[existingIndex].name = candidate
-                    }
-                    appState.subscriptions[existingIndex].lastUpdated = Date()
-                    appState.subscriptions[existingIndex].serverCount = result.servers.count
-                    appState.subscriptions[existingIndex].uploadBytes = result.uploadBytes
-                    appState.subscriptions[existingIndex].downloadBytes = result.downloadBytes
-                    appState.subscriptions[existingIndex].totalBytes = result.totalBytes
-                    appState.subscriptions[existingIndex].expireDate = result.expireDate
-                    if let h = result.updateIntervalHours {
-                        appState.subscriptions[existingIndex].updateIntervalHours = h
-                    }
-                } else {
-                    let subscription = Subscription(
-                        id: subId,
-                        name: effectiveName,
-                        urlString: trimmedUrl,
-                        lastUpdated: Date(),
-                        serverCount: result.servers.count,
-                        uploadBytes: result.uploadBytes,
-                        downloadBytes: result.downloadBytes,
-                        totalBytes: result.totalBytes,
-                        expireDate: result.expireDate,
-                        updateIntervalHours: result.updateIntervalHours ?? 6
-                    )
-                    appState.subscriptions.append(subscription)
-                }
-                
-                for s in result.servers {
-                    appState.addServer(s)
-                }
-                appState.restoreSelectedServer()
-                
-                // If the subscription server returned a routing: "<base64>" header, offer 1-click update
-                if let scheme = result.suggestedRoutingScheme {
-                    appState.pendingRoutingSuggestion = (subscriptionName: effectiveName, scheme: scheme)
-                    appState.appendLog(level: .info, message: "Подписка '\(effectiveName)' передала правила маршрутизации. Доступно быстрое обновление в 1 клик.")
-                }
-                
-                appState.saveServers()
-                appState.saveSubscriptions()
+                // Centralized upsert strictly prevents duplicate subscriptions and servers
+                appState.upsertSubscription(
+                    id: subId,
+                    name: effectiveName,
+                    urlString: trimmedUrl,
+                    servers: result.servers,
+                    uploadBytes: result.uploadBytes,
+                    downloadBytes: result.downloadBytes,
+                    totalBytes: result.totalBytes,
+                    expireDate: result.expireDate,
+                    updateIntervalHours: result.updateIntervalHours ?? 6,
+                    suggestedRoutingScheme: result.suggestedRoutingScheme
+                )
                 
                 showNotification(
                     title: "Подписка обновлена!",

@@ -41,8 +41,12 @@ public final class AppState {
     }
     public var settings: AppSettings = .standard {
         didSet {
+            AppSettings.shared = settings
             if routingConfig.mode != settings.routingMode {
                 routingConfig.mode = settings.routingMode
+            }
+            if oldValue.launchAtLogin != settings.launchAtLogin {
+                LaunchAtLoginManager.safeSetEnabled(settings.launchAtLogin)
             }
             saveSettings()
             UserDefaults.standard.set(settings.autoConnectOnLaunch, forKey: "autoConnectOnLaunch")
@@ -96,6 +100,10 @@ public final class AppState {
     }
     
     // MARK: - Connection Actions
+    
+    /// Tracks the number of auto-reconnection attempts since last successful connect or manual disconnect
+    public var reconnectAttempts: Int = 0
+    
     public func toggleConnection() {
         switch connectionStatus {
         case .connected:
@@ -123,15 +131,38 @@ public final class AppState {
                 server: server,
                 routing: routingConfig,
                 settings: settings,
+                servers: servers,
                 onLog: { [weak self] level, message in
                     self?.appendLog(level: level, message: message)
                 },
                 onUnexpectedTermination: { [weak self] code in
                     Task { @MainActor in
                         guard let self = self else { return }
-                        self.appendLog(level: .error, message: "Внимание: Xray-core неожиданно завершил работу (код \(code)). Сброс сети.")
-                        self.disconnect()
-                        self.connectionStatus = .error("Сбой ядра (код \(code))")
+                        self.appendLog(level: .error, message: "Внимание: Xray-core неожиданно завершил работу (код \(code)).")
+                        
+                        // Kill Switch: block all traffic immediately to prevent IP leak
+                        if self.settings.killSwitchEnabled {
+                            SystemProxyManager.shared.enableKillSwitchBlackhole()
+                            self.appendLog(level: .warning, message: "🛡️ Kill Switch активирован: весь трафик заблокирован для защиты от утечки IP.")
+                        }
+                        
+                        // Auto-Reconnect with exponential backoff
+                        if self.settings.autoReconnectEnabled && self.reconnectAttempts < self.settings.maxReconnectAttempts {
+                            self.reconnectAttempts += 1
+                            let delaySeconds = min(30.0, 2.0 * pow(2.0, Double(self.reconnectAttempts - 1)))
+                            self.appendLog(level: .warning, message: "🔄 Auto-Reconnect (попытка \(self.reconnectAttempts) из \(self.settings.maxReconnectAttempts)) через \(Int(delaySeconds)) сек...")
+                            self.connectionStatus = .connecting
+                            
+                            try? await Task.sleep(nanoseconds: UInt64(delaySeconds * 1_000_000_000))
+                            // Re-check that user hasn't manually disconnected during the sleep
+                            guard self.connectionStatus == .connecting else { return }
+                            self.connect()
+                        } else if self.settings.autoFallbackEnabled {
+                            self.appendLog(level: .warning, message: "♻️ Попытки переподключения исчерпаны. Попытка смены сервера...")
+                            await self.triggerAutoFallback()
+                        } else {
+                            self.handleDisconnectionFailure(code: code)
+                        }
                     }
                 }
             )
@@ -148,6 +179,7 @@ public final class AppState {
             
             self.connectionStatus = .connected
             self.connectedSince = Date()
+            self.reconnectAttempts = 0 // Reset on successful connect
             self.startTelemetryTimer()
             self.appendLog(level: .info, message: "Туннель Xray-core успешно поднят на локальных портах SOCKS:\(settings.socksPort), HTTP:\(settings.httpPort)")
             
@@ -172,13 +204,22 @@ public final class AppState {
         }
     }
     
+    /// Explicit user-initiated disconnect: cleanly restores network (Kill Switch is fully lifted)
     public func disconnect() {
         connectionStatus = .disconnecting
+        reconnectAttempts = 0
         appendLog(level: .info, message: "Остановка Xray-core и сброс сети...")
         
         if settings.trafficMode == .tun {
             TUNManager.shared.stopTun()
         } else {
+            SystemProxyManager.shared.disableProxy()
+        }
+        
+        // Kill Switch cleanup: disableProxy already restores normal routing
+        // even if kill switch was active (it clears the blackhole port too)
+        if settings.killSwitchEnabled {
+            // Ensure proxies are completely removed even in TUN mode
             SystemProxyManager.shared.disableProxy()
         }
         
@@ -188,6 +229,44 @@ public final class AppState {
         self.connectedSince = nil
         self.uptimeSeconds = 0
         self.appendLog(level: .info, message: "Сетевые параметры сброшены. Соединение разорвано.")
+    }
+    
+    /// Handles failed reconnection when all retries are exhausted and auto-fallback is disabled
+    private func handleDisconnectionFailure(code: Int32) {
+        if settings.trafficMode == .tun {
+            TUNManager.shared.stopTun()
+        } else if !settings.killSwitchEnabled {
+            // Only disable proxy if Kill Switch is off; if on, keep blackhole active
+            SystemProxyManager.shared.disableProxy()
+        }
+        self.connectionStatus = .error("Сбой ядра (код \(code))")
+    }
+    
+    /// Auto-Fallback: switches to the server with the lowest ping that isn't the current one
+    @MainActor
+    public func triggerAutoFallback() async {
+        guard let currentId = selectedServerId else {
+            appendLog(level: .error, message: "❌ Auto-Fallback: нет текущего сервера для замены.")
+            disconnect()
+            return
+        }
+        
+        // Find candidates with valid ping, excluding the current server and relay server (if proxy chains enabled)
+        let relayId = settings.proxyChainEnabled ? settings.proxyChainRelayId : nil
+        let candidates = servers
+            .filter { $0.id != currentId && $0.id != relayId && ($0.pingMs ?? 9999) < 2000 }
+            .sorted { ($0.pingMs ?? 9999) < ($1.pingMs ?? 9999) }
+        
+        if let fallbackServer = candidates.first {
+            appendLog(level: .info, message: "🔀 Auto-Fallback: переключение на резервный сервер '\(fallbackServer.name)' (пинг: \(fallbackServer.pingMs ?? 0) мс)...")
+            self.reconnectAttempts = 0
+            self.selectedServerId = fallbackServer.id
+            self.connect()
+        } else {
+            appendLog(level: .error, message: "❌ Auto-Fallback: нет доступных резервных серверов для переключения.")
+            disconnect()
+            self.connectionStatus = .error("Сервер недоступен, нет резерва")
+        }
     }
     
     public func pingServer(id: UUID) {
@@ -262,12 +341,41 @@ public final class AppState {
                 unique.append(s)
             }
         }
-        
-        // Deduplicate subscriptions by urlString
+        if unique.count != servers.count {
+            self.servers = unique
+            if !servers.contains(where: { $0.id == selectedServerId }) {
+                restoreSelectedServer()
+            }
+            saveServers()
+        }
+    }
+    
+    public func deduplicateAll() {
+        // Deduplicate subscriptions by canonical URL and name
         var uniqueSubs: [Subscription] = []
+        var removedSubIds: [UUID: UUID] = [:] // duplicateId -> canonicalId
+        
         for sub in subscriptions {
-            if !uniqueSubs.contains(where: { $0.urlString.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() == sub.urlString.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() }) {
+            if let existing = uniqueSubs.first(where: { $0.isSameSubscription(as: sub.urlString, otherName: sub.name) }) {
+                removedSubIds[sub.id] = existing.id
+            } else {
                 uniqueSubs.append(sub)
+            }
+        }
+        
+        // Re-parent servers belonging to merged subscriptions
+        var reparentedServers = servers
+        for i in 0..<reparentedServers.count {
+            if let subId = reparentedServers[i].subscriptionId, let canonicalId = removedSubIds[subId] {
+                reparentedServers[i].subscriptionId = canonicalId
+            }
+        }
+        
+        // Deduplicate servers
+        var unique: [ServerProfile] = []
+        for s in reparentedServers {
+            if !unique.contains(where: { AppState.isDuplicateServer($0, s) }) {
+                unique.append(s)
             }
         }
         
@@ -282,8 +390,80 @@ public final class AppState {
             }
             saveServers()
             saveSubscriptions()
-            appendLog(level: .info, message: "Выполнена дедупликация: удалено дубликатов серверов")
+            appendLog(level: .info, message: "Выполнена дедупликация: удалено дубликатов подписок и серверов")
         }
+    }
+    
+    /// Centralized, synchronized upsert for subscriptions that strictly prevents duplicates
+    @MainActor
+    public func upsertSubscription(
+        id: UUID,
+        name: String,
+        urlString: String,
+        servers newServers: [ServerProfile],
+        uploadBytes: UInt64? = nil,
+        downloadBytes: UInt64? = nil,
+        totalBytes: UInt64? = nil,
+        expireDate: Date? = nil,
+        updateIntervalHours: Int? = 6,
+        suggestedRoutingScheme: HappRoutingScheme? = nil
+    ) {
+        // Find existing subscription by ID or matching canonical URL/path/name
+        let existingIndex = subscriptions.firstIndex(where: {
+            $0.id == id || $0.isSameSubscription(as: urlString, otherName: name)
+        })
+        
+        let targetId: UUID
+        if let idx = existingIndex {
+            targetId = subscriptions[idx].id
+            // Update existing in-place
+            if !name.isEmpty && !name.starts(with: "Подписка #") {
+                subscriptions[idx].name = name
+            }
+            subscriptions[idx].urlString = urlString
+            subscriptions[idx].lastUpdated = Date()
+            subscriptions[idx].serverCount = newServers.count
+            if let u = uploadBytes { subscriptions[idx].uploadBytes = u }
+            if let d = downloadBytes { subscriptions[idx].downloadBytes = d }
+            if let t = totalBytes { subscriptions[idx].totalBytes = t }
+            if let exp = expireDate { subscriptions[idx].expireDate = exp }
+            if let h = updateIntervalHours { subscriptions[idx].updateIntervalHours = h }
+        } else {
+            targetId = id
+            let sub = Subscription(
+                id: targetId,
+                name: name,
+                urlString: urlString,
+                lastUpdated: Date(),
+                serverCount: newServers.count,
+                uploadBytes: uploadBytes,
+                downloadBytes: downloadBytes,
+                totalBytes: totalBytes,
+                expireDate: expireDate,
+                updateIntervalHours: updateIntervalHours ?? 6
+            )
+            subscriptions.append(sub)
+        }
+        
+        // Remove old servers belonging to this subscription (by targetId or matching rawUri)
+        let newRawUris = Set(newServers.map { $0.rawUri })
+        servers.removeAll(where: { $0.subscriptionId == targetId || (!newRawUris.isEmpty && newRawUris.contains($0.rawUri)) })
+        
+        // Append new servers tagged with targetId
+        for var s in newServers {
+            s.subscriptionId = targetId
+            addServer(s)
+        }
+        
+        restoreSelectedServer()
+        
+        if let scheme = suggestedRoutingScheme {
+            pendingRoutingSuggestion = (subscriptionName: name, scheme: scheme)
+            appendLog(level: .info, message: "Подписка '\(name)' передала правила маршрутизации. Доступно быстрое обновление в 1 клик.")
+        }
+        
+        saveServers()
+        saveSubscriptions()
     }
     
     // MARK: - Server Selection Persistence
@@ -377,6 +557,16 @@ public final class AppState {
         }
         saveServers()
         appendLog(level: .info, message: "Добавлен новый сервер: \(server.name) [\(server.protocolType.rawValue)]")
+    }
+    
+    public func updateServer(_ server: ServerProfile) {
+        if let idx = servers.firstIndex(where: { $0.id == server.id }) {
+            servers[idx] = server
+            saveServers()
+            appendLog(level: .info, message: "Сервер '\(server.name)' успешно обновлен")
+        } else {
+            addServer(server)
+        }
     }
     
     public func deleteServer(id: UUID) {

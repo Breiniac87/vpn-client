@@ -8,6 +8,7 @@ public struct MenuBarServerRow: View {
     public let onSelect: () -> Void
     public var onDoubleClick: (() -> Void)?
     public var onPing: (() -> Void)?
+    public var onEdit: (() -> Void)?
     public var onDelete: (() -> Void)?
     
     @State private var isHovered = false
@@ -19,6 +20,7 @@ public struct MenuBarServerRow: View {
         onSelect: @escaping () -> Void,
         onDoubleClick: (() -> Void)? = nil,
         onPing: (() -> Void)? = nil,
+        onEdit: (() -> Void)? = nil,
         onDelete: (() -> Void)? = nil
     ) {
         self.server = server
@@ -27,6 +29,7 @@ public struct MenuBarServerRow: View {
         self.onSelect = onSelect
         self.onDoubleClick = onDoubleClick
         self.onPing = onPing
+        self.onEdit = onEdit
         self.onDelete = onDelete
     }
     
@@ -151,6 +154,11 @@ public struct MenuBarServerRow: View {
                 NSPasteboard.general.setString("\(server.address):\(server.port)", forType: .string)
             }) {
                 Label("Скопировать адрес", systemImage: "doc.on.doc")
+            }
+            if let onEdit = onEdit {
+                Button(action: onEdit) {
+                    Label("Редактировать...", systemImage: "pencil")
+                }
             }
             if let onDelete = onDelete {
                 Divider()

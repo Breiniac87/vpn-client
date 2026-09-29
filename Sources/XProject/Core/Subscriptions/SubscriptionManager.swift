@@ -37,9 +37,11 @@ public final class SubscriptionManager: Sendable {
     private let urlSession: URLSession
     
     private init() {
-        let config = URLSessionConfiguration.default
+        let config = URLSessionConfiguration.ephemeral
         config.timeoutIntervalForRequest = 35.0
         config.timeoutIntervalForResource = 60.0
+        config.requestCachePolicy = .reloadIgnoringLocalAndRemoteCacheData
+        config.urlCache = nil
         self.urlSession = URLSession(configuration: config)
     }
     
@@ -104,6 +106,61 @@ public final class SubscriptionManager: Sendable {
         return nil
     }
     
+    /// Parses an expiration date from Unix timestamp (seconds or milliseconds), ISO8601, or standard date formats
+    public static func parseExpirationDate(_ rawVal: String) -> Date? {
+        let trimmed = rawVal.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+        
+        // 1. Numeric timestamp (seconds or milliseconds)
+        if let ts = TimeInterval(trimmed), ts > 0 {
+            let seconds = ts > 100_000_000_000 ? ts / 1000.0 : ts
+            return Date(timeIntervalSince1970: seconds)
+        }
+        
+        // 2. ISO8601 format
+        let iso = ISO8601DateFormatter()
+        if let d = iso.date(from: trimmed) { return d }
+        
+        // 3. Common date formats used by panels
+        let formats = [
+            "dd.MM.yyyy", "dd-MM-yyyy", "yyyy-MM-dd",
+            "dd.MM.yyyy HH:mm:ss", "yyyy-MM-dd HH:mm:ss",
+            "yyyy-MM-dd'T'HH:mm:ssZ"
+        ]
+        let df = DateFormatter()
+        df.locale = Locale(identifier: "en_US_POSIX")
+        for fmt in formats {
+            df.dateFormat = fmt
+            if let d = df.date(from: trimmed) {
+                return d
+            }
+        }
+        
+        return nil
+    }
+    
+    /// Extracts expiration date from text remarks like "3X-GB-6 | ⌛25-09-2026" or "server 25.10.2026"
+    public static func extractDateFromText(_ text: String) -> Date? {
+        let pattern = #"[⌛⏰⏳]?\s*(\d{2})[.-](\d{2})[.-](\d{4})"#
+        guard let regex = try? NSRegularExpression(pattern: pattern) else { return nil }
+        let ns = text as NSString
+        guard let match = regex.firstMatch(in: text, options: [], range: NSRange(location: 0, length: ns.length)),
+              match.numberOfRanges >= 4 else { return nil }
+        
+        let dStr = ns.substring(with: match.range(at: 1))
+        let mStr = ns.substring(with: match.range(at: 2))
+        let yStr = ns.substring(with: match.range(at: 3))
+        
+        var comp = DateComponents()
+        comp.day = Int(dStr)
+        comp.month = Int(mStr)
+        comp.year = Int(yStr)
+        comp.hour = 23
+        comp.minute = 59
+        comp.second = 59
+        return Calendar.current.date(from: comp)
+    }
+    
     /// Fetches subscription with parsed traffic quota, expiration date, and profile title
     public func fetchSubscriptionWithUserInfo(from urlString: String, subscriptionId: UUID) async throws -> SubscriptionFetchResult {
         guard let url = URL(string: urlString.trimmingCharacters(in: .whitespacesAndNewlines)) else {
@@ -111,6 +168,9 @@ public final class SubscriptionManager: Sendable {
         }
         
         var request = URLRequest(url: url)
+        request.cachePolicy = .reloadIgnoringLocalAndRemoteCacheData
+        request.setValue("no-cache", forHTTPHeaderField: "Cache-Control")
+        request.setValue("no-cache", forHTTPHeaderField: "Pragma")
         request.setValue("Happ/3.6.0 (iPhone; iOS 18.0; Scale/3.00)", forHTTPHeaderField: "User-Agent")
         
         let data: Data
@@ -146,7 +206,7 @@ public final class SubscriptionManager: Sendable {
             guard let strKey = key as? String, let headerVal = val as? String else { continue }
             let lowerKey = strKey.lowercased()
             
-            if lowerKey == "subscription-userinfo" {
+            if lowerKey == "subscription-userinfo" || lowerKey == "subscription-user-info" {
                 let parts = headerVal.split(separator: ";")
                 for part in parts {
                     let kv = part.split(separator: "=", maxSplits: 1).map { $0.trimmingCharacters(in: .whitespaces) }
@@ -156,10 +216,14 @@ public final class SubscriptionManager: Sendable {
                         if k == "upload", let u = UInt64(v) { uploadBytes = u }
                         else if k == "download", let d = UInt64(v) { downloadBytes = d }
                         else if k == "total", let t = UInt64(v) { totalBytes = t }
-                        else if k == "expire", let e = TimeInterval(v), e > 0 {
-                            expireDate = Date(timeIntervalSince1970: e)
+                        else if k == "expire", let parsed = Self.parseExpirationDate(v) {
+                            expireDate = parsed
                         }
                     }
+                }
+            } else if (lowerKey == "profile-expiration" || lowerKey == "x-profile-expiration" || lowerKey == "x-expire" || lowerKey == "expire") && expireDate == nil {
+                if let parsed = Self.parseExpirationDate(headerVal) {
+                    expireDate = parsed
                 }
             } else if lowerKey == "profile-title" {
                 if let decoded = Self.decodeHeaderValue(headerVal) {
@@ -211,17 +275,36 @@ public final class SubscriptionManager: Sendable {
             decodedContent = rawString
         }
         
-        // If profile title still nil, inspect decoded content header lines (e.g. #profile-title: ...)
-        if profileTitle == nil {
-            let lines = decodedContent.components(separatedBy: .newlines)
-            for line in lines.prefix(5) {
-                let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
-                if trimmed.lowercased().hasPrefix("#profile-title:") || trimmed.lowercased().hasPrefix("//profile-title:") {
-                    let raw = String(trimmed.dropFirst(15))
-                    if let decoded = Self.decodeHeaderValue(raw) {
-                        profileTitle = decoded
-                        break
+        // Inspect decoded content header lines (e.g. #profile-title: ..., #subscription-userinfo: ...)
+        let lines = decodedContent.components(separatedBy: .newlines)
+        for line in lines.prefix(15) {
+            let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
+            let lower = trimmed.lowercased()
+            if (lower.hasPrefix("#profile-title:") || lower.hasPrefix("//profile-title:")) && profileTitle == nil {
+                let raw = String(trimmed.drop(while: { $0 != ":" }).dropFirst())
+                if let decoded = Self.decodeHeaderValue(raw) {
+                    profileTitle = decoded
+                }
+            } else if lower.hasPrefix("#subscription-userinfo:") || lower.hasPrefix("//subscription-userinfo:") {
+                let raw = String(trimmed.drop(while: { $0 != ":" }).dropFirst())
+                let parts = raw.split(separator: ";")
+                for part in parts {
+                    let kv = part.split(separator: "=", maxSplits: 1).map { $0.trimmingCharacters(in: .whitespaces) }
+                    if kv.count == 2 {
+                        let k = kv[0].lowercased()
+                        let v = kv[1]
+                        if k == "upload", uploadBytes == nil, let u = UInt64(v) { uploadBytes = u }
+                        else if k == "download", downloadBytes == nil, let d = UInt64(v) { downloadBytes = d }
+                        else if k == "total", totalBytes == nil, let t = UInt64(v) { totalBytes = t }
+                        else if k == "expire", expireDate == nil, let parsed = Self.parseExpirationDate(v) {
+                            expireDate = parsed
+                        }
                     }
+                }
+            } else if (lower.hasPrefix("#expire:") || lower.hasPrefix("//expire:") || lower.hasPrefix("#profile-expiration:")) && expireDate == nil {
+                let raw = String(trimmed.drop(while: { $0 != ":" }).dropFirst())
+                if let parsed = Self.parseExpirationDate(raw) {
+                    expireDate = parsed
                 }
             }
         }
@@ -229,6 +312,31 @@ public final class SubscriptionManager: Sendable {
         var servers = URLSchemeParser.parseContent(decodedContent)
         if servers.isEmpty && decodedContent != rawString {
             servers = URLSchemeParser.parseContent(rawString)
+        }
+        
+        // Fallback: If expireDate is still nil, try extracting from server remarks (e.g. "3X-GB-6 | ⌛25-09-2026")
+        if expireDate == nil {
+            for server in servers {
+                if let extracted = Self.extractDateFromText(server.name) {
+                    expireDate = extracted
+                    break
+                }
+            }
+        }
+        
+        // If expireDate is known, update any dates embedded in server remark names so they stay fresh
+        if let exp = expireDate {
+            let df = DateFormatter()
+            df.dateFormat = "dd-MM-yyyy"
+            let targetDateStr = df.string(from: exp)
+            let dateRegex = try? NSRegularExpression(pattern: #"([⌛⏰⏳]?\s*)\d{2}[.-]\d{2}[.-]\d{4}"#)
+            for i in 0..<servers.count {
+                if let reg = dateRegex {
+                    let sName = servers[i].name
+                    let range = NSRange(location: 0, length: (sName as NSString).length)
+                    servers[i].name = reg.stringByReplacingMatches(in: sName, options: [], range: range, withTemplate: "$1\(targetDateStr)")
+                }
+            }
         }
         
         // Tag servers with this subscription ID
@@ -275,35 +383,19 @@ public final class SubscriptionManager: Sendable {
                         return
                     }
                     
-                    let prevSelectedName = appState.selectedServer?.name
-                    // Remove old servers belonging to this subscription
-                    appState.servers.removeAll(where: { $0.subscriptionId == sub.id })
-                    // Append new
-                    appState.servers.append(contentsOf: result.servers)
-                    appState.restoreSelectedServer(preferringName: prevSelectedName)
-                    
-                    // Update subscription info
-                    if let idx = appState.subscriptions.firstIndex(where: { $0.id == sub.id }) {
-                        if let title = result.profileTitle, !title.isEmpty {
-                            appState.subscriptions[idx].name = title
-                        }
-                        appState.subscriptions[idx].lastUpdated = Date()
-                        appState.subscriptions[idx].serverCount = result.servers.count
-                        if let u = result.uploadBytes { appState.subscriptions[idx].uploadBytes = u }
-                        if let d = result.downloadBytes { appState.subscriptions[idx].downloadBytes = d }
-                        if let t = result.totalBytes { appState.subscriptions[idx].totalBytes = t }
-                        if let exp = result.expireDate { appState.subscriptions[idx].expireDate = exp }
-                        if let h = result.updateIntervalHours { appState.subscriptions[idx].updateIntervalHours = h }
-                    }
-                    
-                    // Check for server suggested routing rules
-                    if let scheme = result.suggestedRoutingScheme {
-                        appState.pendingRoutingSuggestion = (subscriptionName: sub.name, scheme: scheme)
-                        appState.appendLog(level: .info, message: "Подписка '\(sub.name)' передала правила маршрутизации. Доступно быстрое обновление в 1 клик.")
-                    }
-                    
-                    appState.saveServers()
-                    appState.saveSubscriptions()
+                    let effectiveTitle = (result.profileTitle?.isEmpty == false) ? result.profileTitle! : sub.name
+                    appState.upsertSubscription(
+                        id: sub.id,
+                        name: effectiveTitle,
+                        urlString: sub.urlString,
+                        servers: result.servers,
+                        uploadBytes: result.uploadBytes,
+                        downloadBytes: result.downloadBytes,
+                        totalBytes: result.totalBytes,
+                        expireDate: result.expireDate,
+                        updateIntervalHours: result.updateIntervalHours ?? sub.updateIntervalHours,
+                        suggestedRoutingScheme: result.suggestedRoutingScheme
+                    )
                 }
                 totalFetched += result.servers.count
                 appState.appendLog(level: .info, message: "Подписка '\(sub.name)' обновлена: загружено \(result.servers.count) серверов")

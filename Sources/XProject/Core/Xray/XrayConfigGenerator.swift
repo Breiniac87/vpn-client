@@ -6,7 +6,8 @@ public struct XrayConfigGenerator {
     public static func generateConfig(
         server: ServerProfile,
         routing: RoutingConfig,
-        settings: AppSettings
+        settings: AppSettings,
+        servers: [ServerProfile] = []
     ) throws -> String {
         var config: [String: Any] = [:]
         
@@ -21,11 +22,13 @@ public struct XrayConfigGenerator {
             ? ["http", "tls", "quic", "fakedns"]
             : ["http", "tls", "quic"]
         
+        let listenAddress = settings.allowLanConnections ? "0.0.0.0" : "127.0.0.1"
+        
         let inbounds: [[String: Any]] = [
             [
                 "tag": "socks-in",
                 "port": settings.socksPort,
-                "listen": "127.0.0.1",
+                "listen": listenAddress,
                 "protocol": "socks",
                 "sniffing": [
                     "enabled": true,
@@ -41,7 +44,7 @@ public struct XrayConfigGenerator {
             [
                 "tag": "http-in",
                 "port": settings.httpPort,
-                "listen": "127.0.0.1",
+                "listen": listenAddress,
                 "protocol": "http",
                 "sniffing": [
                     "enabled": true,
@@ -53,34 +56,8 @@ public struct XrayConfigGenerator {
         ]
         config["inbounds"] = inbounds
         
-        // MARK: - 3. Outbounds
-        var outbounds: [[String: Any]] = []
-        
-        // Primary Proxy Outbound
-        let proxyOutbound = try buildProxyOutbound(for: server)
-        outbounds.append(proxyOutbound)
-        
-        // Direct Outbound
-        outbounds.append([
-            "tag": "direct",
-            "protocol": "freedom",
-            "settings": [
-                "domainStrategy": "AsIs"
-            ]
-        ])
-        
-        // Block Outbound
-        outbounds.append([
-            "tag": "block",
-            "protocol": "blackhole",
-            "settings": [
-                "response": [
-                    "type": "http"
-                ]
-            ]
-        ])
-        
-        config["outbounds"] = outbounds
+        // MARK: - 3. Outbounds (Strategy Pattern)
+        config["outbounds"] = try generateOutbounds(server: server, settings: settings, servers: servers)
         
         // MARK: - 4. FakeDNS (if enabled)
         if routing.fakeDnsEnabled {
@@ -117,6 +94,414 @@ public struct XrayConfigGenerator {
         }
         
         return jsonString
+    }
+    
+    // MARK: - Outbounds Strategy Pattern (Stealth Profiles)
+    
+    /// Generates outbound configurations based on the selected Stealth Profile (Strategy Pattern)
+    public static func generateOutbounds(server: ServerProfile, settings: AppSettings = .shared, servers: [ServerProfile] = []) throws -> [[String: Any]] {
+        let profile = (settings.stealthProfile != .standardReality) ? settings.stealthProfile : AppSettings.shared.stealthProfile
+        var outbounds: [[String: Any]]
+        switch profile {
+        case .standardReality:
+            outbounds = try buildStandardRealityOutbounds(server: server, settings: settings)
+        case .cdnFronting:
+            outbounds = try buildCDNFrontingOutbounds(server: server, settings: settings)
+        case .webrtcCamouflage:
+            outbounds = try buildWebRTCOutbounds(server: server, settings: settings)
+        case .quicMasquerade:
+            outbounds = try buildQUICMasqueradeOutbounds(server: server, settings: settings)
+        }
+        
+        // Proxy Chains: Insert relay outbound and wire dialerProxy on the proxy outbound
+        if settings.proxyChainEnabled || AppSettings.shared.proxyChainEnabled {
+            let relayId = settings.proxyChainRelayId ?? AppSettings.shared.proxyChainRelayId
+            if let relayId = relayId,
+               let relayServer = servers.first(where: { $0.id == relayId }),
+               relayServer.id != server.id {
+                var relayOutbound = try buildProxyOutbound(for: relayServer)
+                relayOutbound["tag"] = "relay-outbound"
+                
+                // Wire the main proxy to route through the relay
+                if var proxyOut = outbounds.first,
+                   let proxyTag = proxyOut["tag"] as? String, proxyTag == "proxy" {
+                    var streamSettings = (proxyOut["streamSettings"] as? [String: Any]) ?? [:]
+                    var sockopt = (streamSettings["sockopt"] as? [String: Any]) ?? [:]
+                    sockopt["dialerProxy"] = "relay-outbound"
+                    streamSettings["sockopt"] = sockopt
+                    proxyOut["streamSettings"] = streamSettings
+                    outbounds[0] = proxyOut
+                }
+                
+                // Insert relay outbound after the proxy outbound
+                outbounds.insert(relayOutbound, at: 1)
+            }
+        }
+        
+        return outbounds
+    }
+    
+    /// Strategy 1: Standard Reality with Chained Freedom DialerProxy (Anti-DPI Fragment + Noise Injection)
+    public static func buildStandardRealityOutbounds(server: ServerProfile, settings: AppSettings = .shared) throws -> [[String: Any]] {
+        var outbounds: [[String: Any]] = []
+        var proxyOutbound = try buildProxyOutbound(for: server)
+        
+        let fragmentEnabled = settings.fragmentEnabled || (settings == .standard && AppSettings.shared.fragmentEnabled)
+        let isStreamingActive = settings.streamingMimicryEnabled || (settings == .standard && AppSettings.shared.streamingMimicryEnabled)
+        let noiseEnabled = (settings.noiseEnabled || (settings == .standard && AppSettings.shared.noiseEnabled)) && !isStreamingActive
+        let isAntiDpiEnabled = fragmentEnabled || noiseEnabled
+        let dialerTag = "anti-dpi-dialer"
+        
+        var streamSettings = (proxyOutbound["streamSettings"] as? [String: Any]) ?? [:]
+        var sockopt = (streamSettings["sockopt"] as? [String: Any]) ?? [:]
+        
+        if isAntiDpiEnabled {
+            sockopt["dialerProxy"] = dialerTag
+            
+            // Remove legacy direct fragment to avoid duplicate fragmentation
+            if fragmentEnabled {
+                proxyOutbound.removeValue(forKey: "fragment")
+            }
+        }
+        
+        // Modifiers: Micro-sessions & Port Hopping
+        if settings.enableMicroSessions || AppSettings.shared.enableMicroSessions {
+            sockopt["tcpKeepAliveInterval"] = 15
+            sockopt["tcpNoDelay"] = true
+        }
+        
+        if !sockopt.isEmpty {
+            streamSettings["sockopt"] = sockopt
+            proxyOutbound["streamSettings"] = streamSettings
+        }
+        
+        outbounds.append(proxyOutbound)
+        
+        if isAntiDpiEnabled {
+            var dialerSettings: [String: Any] = [
+                "domainStrategy": "AsIs"
+            ]
+            
+            if fragmentEnabled {
+                let packets = settings.fragmentEnabled ? settings.fragmentPackets : AppSettings.shared.fragmentPackets
+                let length = settings.fragmentEnabled ? settings.fragmentLength : AppSettings.shared.fragmentLength
+                let interval = settings.fragmentEnabled ? settings.fragmentInterval : AppSettings.shared.fragmentInterval
+                
+                dialerSettings["fragment"] = [
+                    "packets": packets,
+                    "length": length,
+                    "interval": interval
+                ]
+            }
+            
+            if noiseEnabled {
+                let type = settings.noiseEnabled ? settings.noiseType : AppSettings.shared.noiseType
+                let packet = settings.noiseEnabled ? settings.noisePacket : AppSettings.shared.noisePacket
+                let delay = settings.noiseEnabled ? settings.noiseDelay : AppSettings.shared.noiseDelay
+                
+                dialerSettings["noises"] = [
+                    [
+                        "type": type,
+                        "packet": packet,
+                        "delay": delay
+                    ]
+                ]
+            }
+            
+            outbounds.append([
+                "tag": dialerTag,
+                "protocol": "freedom",
+                "settings": dialerSettings
+            ])
+        }
+        
+        // Direct Outbound
+        outbounds.append([
+            "tag": "direct",
+            "protocol": "freedom",
+            "settings": [
+                "domainStrategy": "AsIs"
+            ]
+        ])
+        
+        // Block Outbound
+        outbounds.append([
+            "tag": "block",
+            "protocol": "blackhole",
+            "settings": [
+                "response": [
+                    "type": "http"
+                ]
+            ]
+        ])
+        
+        return outbounds
+    }
+    
+    /// Strategy 2: CDN Fronting via XHTTP transport over TLS (bypasses Reality/raw TCP filters)
+    public static func buildCDNFrontingOutbounds(server: ServerProfile, settings: AppSettings = .shared) throws -> [[String: Any]] {
+        var proxyOutbound = try buildProxyOutbound(for: server)
+        
+        // Anti-DPI (Fragment & Noise) parameters are strictly reserved for Standard Reality.
+        // Forcibly ignore fragment and noise to prevent invalid or conflicting Xray transport configs.
+        proxyOutbound.removeValue(forKey: "fragment")
+        
+        // Strip flow (Vision is incompatible with XHTTP/Splithttp transport)
+        if var proxySettings = proxyOutbound["settings"] as? [String: Any],
+           var vnext = proxySettings["vnext"] as? [[String: Any]] {
+            for i in 0..<vnext.count {
+                if var users = vnext[i]["users"] as? [[String: Any]] {
+                    for j in 0..<users.count {
+                        users[j].removeValue(forKey: "flow")
+                    }
+                    vnext[i]["users"] = users
+                }
+            }
+            proxySettings["vnext"] = vnext
+            proxyOutbound["settings"] = proxySettings
+        }
+        
+        let customCdnHost = !settings.cdnHost.isEmpty ? settings.cdnHost : AppSettings.shared.cdnHost
+        let hostHeader = !customCdnHost.isEmpty ? customCdnHost : (server.vlessDetails?.hostHeader ?? server.vlessDetails?.serverName ?? server.address)
+        
+        let customCdnPath = (!settings.cdnPath.isEmpty && settings.cdnPath != "/") ? settings.cdnPath : ((!AppSettings.shared.cdnPath.isEmpty && AppSettings.shared.cdnPath != "/") ? AppSettings.shared.cdnPath : nil)
+        let path = customCdnPath ?? server.vlessDetails?.path ?? settings.cdnPath
+        
+        var streamSettings: [String: Any] = [
+            "network": "xhttp",
+            "security": "tls",
+            "tlsSettings": [
+                "serverName": hostHeader
+            ],
+            "xhttpSettings": [
+                "path": path,
+                "host": hostHeader,
+                "mode": "auto"
+            ]
+        ]
+        
+        if settings.enableMicroSessions || AppSettings.shared.enableMicroSessions {
+            var sockopt: [String: Any] = [:]
+            sockopt["tcpKeepAliveInterval"] = 15
+            sockopt["tcpNoDelay"] = true
+            streamSettings["sockopt"] = sockopt
+        }
+        
+        proxyOutbound["streamSettings"] = streamSettings
+        
+        return [
+            proxyOutbound,
+            [
+                "tag": "direct",
+                "protocol": "freedom",
+                "settings": [
+                    "domainStrategy": "AsIs"
+                ]
+            ],
+            [
+                "tag": "block",
+                "protocol": "blackhole",
+                "settings": [
+                    "response": [
+                        "type": "http"
+                    ]
+                ]
+            ]
+        ]
+    }
+    
+    /// Strategy 3: WebRTC / Video Call Camouflage (UDP media stream emulation)
+    public static func buildWebRTCOutbounds(server: ServerProfile, settings: AppSettings = .shared) throws -> [[String: Any]] {
+        var proxyOutbound = try buildProxyOutbound(for: server)
+        
+        // Anti-DPI (Fragment & Noise) parameters are strictly reserved for Standard Reality.
+        // Forcibly ignore fragment and noise to prevent invalid or conflicting Xray transport configs.
+        proxyOutbound.removeValue(forKey: "fragment")
+        
+        // Strip flow (Vision is incompatible with UDP/KCP transport)
+        if var proxySettings = proxyOutbound["settings"] as? [String: Any],
+           var vnext = proxySettings["vnext"] as? [[String: Any]] {
+            for i in 0..<vnext.count {
+                if var users = vnext[i]["users"] as? [[String: Any]] {
+                    for j in 0..<users.count {
+                        users[j].removeValue(forKey: "flow")
+                    }
+                    vnext[i]["users"] = users
+                }
+            }
+            proxySettings["vnext"] = vnext
+            proxyOutbound["settings"] = proxySettings
+        }
+        
+        let customSni = !settings.webrtcSni.isEmpty ? settings.webrtcSni : AppSettings.shared.webrtcSni
+        let effectiveSni = !customSni.isEmpty ? customSni : (server.vlessDetails?.serverName ?? "")
+        
+        // Configure streamSettings for UDP media packet stream (kcp transport)
+        var streamSettings: [String: Any] = [
+            "network": "kcp",
+            "security": effectiveSni.isEmpty ? "none" : "tls",
+            "kcpSettings": [
+                "mtu": 1350,
+                "tti": 50,
+                "uplinkCapacity": 100,
+                "downlinkCapacity": 100,
+                "congestion": false
+            ]
+        ]
+        
+        if !effectiveSni.isEmpty {
+            streamSettings["tlsSettings"] = [
+                "serverName": effectiveSni
+            ]
+        }
+        
+        if settings.enableMicroSessions || AppSettings.shared.enableMicroSessions {
+            var sockopt: [String: Any] = [:]
+            sockopt["tcpKeepAliveInterval"] = 10
+            streamSettings["sockopt"] = sockopt
+        }
+        
+        proxyOutbound["streamSettings"] = streamSettings
+        
+        return [
+            proxyOutbound,
+            [
+                "tag": "direct",
+                "protocol": "freedom",
+                "settings": [
+                    "domainStrategy": "AsIs"
+                ]
+            ],
+            [
+                "tag": "block",
+                "protocol": "blackhole",
+                "settings": [
+                    "response": [
+                        "type": "http"
+                    ]
+                ]
+            ]
+        ]
+    }
+    
+    /// Strategy 4: HTTP/3 QUIC Masquerade via XHTTP stream-one H3 (full TCP bypass over UDP)
+    public static func buildQUICMasqueradeOutbounds(server: ServerProfile, settings: AppSettings = .shared) throws -> [[String: Any]] {
+        var proxyOutbound = try buildProxyOutbound(for: server)
+        
+        // Anti-DPI (Fragment & Noise) are strictly reserved for Standard Reality.
+        proxyOutbound.removeValue(forKey: "fragment")
+        
+        // Strip flow (Vision is incompatible with XHTTP transport)
+        if var proxySettings = proxyOutbound["settings"] as? [String: Any],
+           var vnext = proxySettings["vnext"] as? [[String: Any]] {
+            for i in 0..<vnext.count {
+                if var users = vnext[i]["users"] as? [[String: Any]] {
+                    for j in 0..<users.count {
+                        users[j].removeValue(forKey: "flow")
+                    }
+                    vnext[i]["users"] = users
+                }
+            }
+            proxySettings["vnext"] = vnext
+            proxyOutbound["settings"] = proxySettings
+        }
+        
+        let hostHeader = server.vlessDetails?.hostHeader ?? server.vlessDetails?.serverName ?? server.address
+        
+        var xhttpSettings: [String: Any] = [
+            "path": server.vlessDetails?.path ?? "/h3-stream",
+            "host": hostHeader,
+            "mode": "stream-one" // H3 QUIC streaming mode
+        ]
+        
+        var sni = hostHeader
+        
+        // Streaming Mimicry: inject AppleCoreMedia User-Agent headers
+        if settings.streamingMimicryEnabled || AppSettings.shared.streamingMimicryEnabled {
+            let cdnDomain = !settings.streamingMimicryCdn.isEmpty ? settings.streamingMimicryCdn : AppSettings.shared.streamingMimicryCdn
+            if !cdnDomain.isEmpty {
+                xhttpSettings["host"] = cdnDomain
+                sni = cdnDomain
+            }
+            xhttpSettings["headers"] = [
+                "User-Agent": "AppleCoreMedia/1.0.0.21G72 (Macintosh; Intel Mac OS X 14_6_1)",
+                "Accept": "video/mp2t,application/vnd.apple.mpegurl,application/dash+xml"
+            ]
+        }
+        
+        var streamSettings: [String: Any] = [
+            "network": "xhttp",
+            "security": "tls",
+            "tlsSettings": [
+                "serverName": sni
+            ],
+            "xhttpSettings": xhttpSettings
+        ]
+        
+        if settings.enableMicroSessions || AppSettings.shared.enableMicroSessions {
+            var sockopt: [String: Any] = [:]
+            sockopt["tcpKeepAliveInterval"] = 15
+            sockopt["tcpNoDelay"] = true
+            streamSettings["sockopt"] = sockopt
+        }
+        
+        proxyOutbound["streamSettings"] = streamSettings
+        
+        var outbounds: [[String: Any]] = [proxyOutbound]
+        
+        // Temporal Shaping: add freedom dialer with intensity-based noise for jitter
+        if settings.temporalShapingEnabled || AppSettings.shared.temporalShapingEnabled {
+            let intensity = settings.temporalShapingEnabled ? settings.temporalShapingIntensity : AppSettings.shared.temporalShapingIntensity
+            let params = intensity.noiseParameters
+            let temporalDialer: [String: Any] = [
+                "tag": "temporal-shaping-dialer",
+                "protocol": "freedom",
+                "settings": [
+                    "domainStrategy": "AsIs",
+                    "noises": [
+                        [
+                            "type": "rand",
+                            "packet": params.packet,
+                            "delay": params.delay
+                        ]
+                    ]
+                ]
+            ]
+            
+            // Wire the proxy outbound through the temporal shaping dialer
+            if var proxyOut = outbounds.first {
+                var stream = (proxyOut["streamSettings"] as? [String: Any]) ?? [:]
+                var sockopt = (stream["sockopt"] as? [String: Any]) ?? [:]
+                // Only set if not already using a different dialer (e.g. proxy chain)
+                if sockopt["dialerProxy"] == nil {
+                    sockopt["dialerProxy"] = "temporal-shaping-dialer"
+                    stream["sockopt"] = sockopt
+                    proxyOut["streamSettings"] = stream
+                    outbounds[0] = proxyOut
+                }
+            }
+            
+            outbounds.append(temporalDialer)
+        }
+        
+        outbounds.append([
+            "tag": "direct",
+            "protocol": "freedom",
+            "settings": [
+                "domainStrategy": "AsIs"
+            ]
+        ])
+        outbounds.append([
+            "tag": "block",
+            "protocol": "blackhole",
+            "settings": [
+                "response": [
+                    "type": "http"
+                ]
+            ]
+        ])
+        
+        return outbounds
     }
     
     // MARK: - Outbound Builders

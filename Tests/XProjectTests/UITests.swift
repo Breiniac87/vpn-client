@@ -44,7 +44,7 @@ final class UITests: XCTestCase {
     }
     
     @MainActor
-    func testDynamicIconChangeOnStatusTransition() {
+    func testDynamicIconChangeOnStatusTransition() async {
         let appState = AppState()
         let coordinator = MenuBarCoordinator(appState: appState)
         
@@ -55,12 +55,15 @@ final class UITests: XCTestCase {
         }
         
         appState.connectionStatus = .connecting
+        await Task.yield()
         XCTAssertEqual(receivedStatus, .connecting)
         
         appState.connectionStatus = .connected
+        await Task.yield()
         XCTAssertEqual(receivedStatus, .connected)
         
         appState.connectionStatus = .disconnected
+        await Task.yield()
         XCTAssertEqual(receivedStatus, .disconnected)
     }
 }

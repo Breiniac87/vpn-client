@@ -344,6 +344,234 @@ public struct SelfTestRunner {
             assert(result.isValid, "UltimaVPN server Xray validation failed: \(result.output)")
         }
         
+        test("Валидация Xray-core с Chained dialerProxy, fragment и noises через xray -test -c") {
+            var antiDpiSettings = AppSettings.standard
+            antiDpiSettings.fragmentEnabled = true
+            antiDpiSettings.fragmentPackets = "1-3"
+            antiDpiSettings.fragmentLength = "50-100"
+            antiDpiSettings.fragmentInterval = "10-20"
+            antiDpiSettings.noiseEnabled = true
+            antiDpiSettings.noiseType = "rand"
+            antiDpiSettings.noisePacket = "50-100"
+            antiDpiSettings.noiseDelay = "10-20"
+            
+            let sampleServer = ServerProfile(
+                name: "Anti-DPI Reality Node",
+                address: "1.2.3.4",
+                port: 443,
+                protocolType: .vless,
+                vlessDetails: VLESSDetails(
+                    uuid: "a28b0561-269e-4e4b-97e3-059c1c4f5f5e",
+                    flow: "xtls-rprx-vision",
+                    security: "reality",
+                    serverName: "speedtest.net",
+                    publicKey: "oI7CDmF6T6g15MMInNEtC3TyoLc2PZ8EUc2R9lYOlEE",
+                    shortId: "6ba7b810"
+                )
+            )
+            
+            // 1. Проверяем структуру сгенерированного конфигурационного JSON
+            let configJson = try XrayConfigGenerator.generateConfig(
+                server: sampleServer,
+                routing: .defaultConfiguration,
+                settings: antiDpiSettings
+            )
+            guard let jsonData = configJson.data(using: .utf8),
+                  let json = try JSONSerialization.jsonObject(with: jsonData) as? [String: Any],
+                  let outbounds = json["outbounds"] as? [[String: Any]] else {
+                throw ParserError.missingField("Не удалось распарсить сгенерированный configJson")
+            }
+            
+            // Проверка привязки sockopt.dialerProxy в основном proxy outbound
+            guard let proxyOutbound = outbounds.first(where: { ($0["tag"] as? String) == "proxy" }),
+                  let streamSettings = proxyOutbound["streamSettings"] as? [String: Any],
+                  let sockopt = streamSettings["sockopt"] as? [String: Any],
+                  let dialerProxy = sockopt["dialerProxy"] as? String else {
+                throw ParserError.missingField("В outbound proxy отсутствует streamSettings.sockopt.dialerProxy")
+            }
+            assert(dialerProxy == "anti-dpi-dialer", "dialerProxy должен указывать на 'anti-dpi-dialer'")
+            assert(proxyOutbound["fragment"] == nil, "Прямой fragment должен быть удален из proxy для избежания конфликтов")
+            
+            // Проверка цепочки dialerProxy: наличие вспомогательного outbound freedom
+            guard let dialerOutbound = outbounds.first(where: { ($0["tag"] as? String) == "anti-dpi-dialer" }) else {
+                throw ParserError.missingField("В outbounds отсутствует исходящий узел 'anti-dpi-dialer'")
+            }
+            assert((dialerOutbound["protocol"] as? String) == "freedom")
+            guard let dialerSettings = dialerOutbound["settings"] as? [String: Any] else {
+                throw ParserError.missingField("В anti-dpi-dialer отсутствуют settings")
+            }
+            
+            // Проверка секции fragment внутри dialerProxy
+            guard let fragment = dialerSettings["fragment"] as? [String: Any] else {
+                throw ParserError.missingField("В anti-dpi-dialer отсутствует секция fragment")
+            }
+            assert((fragment["packets"] as? String) == "1-3")
+            assert((fragment["length"] as? String) == "50-100")
+            assert((fragment["interval"] as? String) == "10-20")
+            
+            // Проверка секции noises внутри dialerProxy
+            guard let noises = dialerSettings["noises"] as? [[String: Any]], !noises.isEmpty else {
+                throw ParserError.missingField("В anti-dpi-dialer отсутствует секция noises")
+            }
+            assert((noises[0]["type"] as? String) == "rand")
+            assert((noises[0]["packet"] as? String) == "50-100")
+            assert((noises[0]["delay"] as? String) == "10-20")
+            
+            // 2. Валидация официальным бинарным файлом xray через команду xray -test -c
+            let result = try XrayProcessManager.shared.testConfiguration(
+                server: sampleServer,
+                routing: .defaultConfiguration,
+                settings: antiDpiSettings
+            )
+            assert(result.isValid, "Валидация бинарником xray с Chained dialerProxy провалилась: \(result.output)")
+        }
+        
+        test("Валидация inbounds при переключении allowLanConnections (127.0.0.1 vs 0.0.0.0)") {
+            var localSettings = AppSettings.standard
+            localSettings.allowLanConnections = false
+            
+            let sampleServer = ServerProfile(
+                name: "Test Node",
+                address: "1.2.3.4",
+                port: 443,
+                protocolType: .vless,
+                vlessDetails: VLESSDetails(
+                    uuid: "a28b0561-269e-4e4b-97e3-059c1c4f5f5e",
+                    flow: "xtls-rprx-vision",
+                    security: "reality",
+                    serverName: "speedtest.net",
+                    publicKey: "oI7CDmF6T6g15MMInNEtC3TyoLc2PZ8EUc2R9lYOlEE",
+                    shortId: "6ba7b810"
+                )
+            )
+            
+            let localJson = try XrayConfigGenerator.generateConfig(server: sampleServer, routing: .defaultConfiguration, settings: localSettings)
+            guard let localData = localJson.data(using: .utf8),
+                  let localDict = try JSONSerialization.jsonObject(with: localData) as? [String: Any],
+                  let localInbounds = localDict["inbounds"] as? [[String: Any]] else {
+                throw ParserError.missingField("Не удалось распарсить inbounds для localSettings")
+            }
+            for inb in localInbounds {
+                assert((inb["listen"] as? String) == "127.0.0.1", "Ожидался listen 127.0.0.1 при отключенном LAN")
+            }
+            
+            var lanSettings = AppSettings.standard
+            lanSettings.allowLanConnections = true
+            let lanJson = try XrayConfigGenerator.generateConfig(server: sampleServer, routing: .defaultConfiguration, settings: lanSettings)
+            guard let lanData = lanJson.data(using: .utf8),
+                  let lanDict = try JSONSerialization.jsonObject(with: lanData) as? [String: Any],
+                  let lanInbounds = lanDict["inbounds"] as? [[String: Any]] else {
+                throw ParserError.missingField("Не удалось распарсить inbounds для lanSettings")
+            }
+            for inb in lanInbounds {
+                assert((inb["listen"] as? String) == "0.0.0.0", "Ожидался listen 0.0.0.0 при включенном LAN")
+            }
+            
+            let lanResult = try XrayProcessManager.shared.testConfiguration(server: sampleServer, routing: .defaultConfiguration, settings: lanSettings)
+            assert(lanResult.isValid, "Валидация LAN-конфигурации бинарником xray провалилась: \(lanResult.output)")
+        }
+        
+        test("Валидация Stealth Profile: CDN Fronting (xhttp over TLS) через xray -test -c") {
+            var cdnSettings = AppSettings.standard
+            cdnSettings.stealthProfile = .cdnFronting
+            cdnSettings.cdnHost = "cdn.cloudflare.com"
+            cdnSettings.cdnPath = "/api/v1/xhttp"
+            cdnSettings.enableMicroSessions = true
+            
+            let sampleServer = ServerProfile(
+                name: "CDN Fronting Test Node",
+                address: "cdn.cloudflare.com",
+                port: 443,
+                protocolType: .vless,
+                vlessDetails: VLESSDetails(
+                    uuid: "a28b0561-269e-4e4b-97e3-059c1c4f5f5e",
+                    serverName: "cdn.cloudflare.com",
+                    path: "/api/v1/xhttp"
+                )
+            )
+            
+            let configJson = try XrayConfigGenerator.generateConfig(
+                server: sampleServer,
+                routing: .defaultConfiguration,
+                settings: cdnSettings
+            )
+            
+            guard let jsonData = configJson.data(using: .utf8),
+                  let json = try JSONSerialization.jsonObject(with: jsonData) as? [String: Any],
+                  let outbounds = json["outbounds"] as? [[String: Any]],
+                  let proxy = outbounds.first(where: { ($0["tag"] as? String) == "proxy" }),
+                  let stream = proxy["streamSettings"] as? [String: Any] else {
+                throw ParserError.missingField("Не удалось распарсить streamSettings для CDN Fronting")
+            }
+            
+            assert((stream["network"] as? String) == "xhttp", "Сеть должна быть xhttp")
+            assert((stream["security"] as? String) == "tls", "Безопасность должна быть tls")
+            assert(stream["realitySettings"] == nil, "Reality должен отсутствовать в CDN Fronting")
+            
+            let xhttp = stream["xhttpSettings"] as? [String: Any]
+            assert((xhttp?["host"] as? String) == "cdn.cloudflare.com")
+            assert((xhttp?["path"] as? String) == "/api/v1/xhttp")
+            
+            let sockopt = stream["sockopt"] as? [String: Any]
+            assert((sockopt?["tcpKeepAliveInterval"] as? Int) == 15, "Micro-sessions keepalive должно быть 15")
+            assert((sockopt?["tcpNoDelay"] as? Bool) == true, "Micro-sessions tcpNoDelay должно быть true")
+            
+            let result = try XrayProcessManager.shared.testConfiguration(
+                server: sampleServer,
+                routing: .defaultConfiguration,
+                settings: cdnSettings
+            )
+            assert(result.isValid, "Валидация CDN Fronting бинарником xray провалилась: \(result.output)")
+        }
+        
+        test("Валидация Stealth Profile: WebRTC Camouflage (kcp/UDP) через xray -test -c") {
+            var webrtcSettings = AppSettings.standard
+            webrtcSettings.stealthProfile = .webrtcCamouflage
+            webrtcSettings.webrtcSni = "webrtc.zoom.us"
+            webrtcSettings.enableMicroSessions = true
+            
+            let sampleServer = ServerProfile(
+                name: "WebRTC Camouflage Node",
+                address: "1.2.3.4",
+                port: 443,
+                protocolType: .vless,
+                vlessDetails: VLESSDetails(uuid: "a28b0561-269e-4e4b-97e3-059c1c4f5f5e")
+            )
+            
+            let configJson = try XrayConfigGenerator.generateConfig(
+                server: sampleServer,
+                routing: .defaultConfiguration,
+                settings: webrtcSettings
+            )
+            
+            guard let jsonData = configJson.data(using: .utf8),
+                  let json = try JSONSerialization.jsonObject(with: jsonData) as? [String: Any],
+                  let outbounds = json["outbounds"] as? [[String: Any]],
+                  let proxy = outbounds.first(where: { ($0["tag"] as? String) == "proxy" }),
+                  let stream = proxy["streamSettings"] as? [String: Any] else {
+                throw ParserError.missingField("Не удалось распарсить streamSettings для WebRTC Camouflage")
+            }
+            
+            assert((stream["network"] as? String) == "kcp", "Сеть должна быть kcp")
+            assert((stream["security"] as? String) == "tls", "Безопасность должна быть tls при указанном SNI")
+            
+            let tls = stream["tlsSettings"] as? [String: Any]
+            assert((tls?["serverName"] as? String) == "webrtc.zoom.us")
+            
+            let kcp = stream["kcpSettings"] as? [String: Any]
+            assert((kcp?["mtu"] as? Int) == 1350)
+            
+            let sockopt = stream["sockopt"] as? [String: Any]
+            assert((sockopt?["tcpKeepAliveInterval"] as? Int) == 10)
+            
+            let result = try XrayProcessManager.shared.testConfiguration(
+                server: sampleServer,
+                routing: .defaultConfiguration,
+                settings: webrtcSettings
+            )
+            assert(result.isValid, "Валидация WebRTC Camouflage бинарником xray провалилась: \(result.output)")
+        }
+        
         // MARK: - 4. Storage & Persistence
         print("\n[4/5] Тестирование сериализации и хранилища:")
         test("JSON Roundtrip для ServerProfile и RoutingConfig") {
@@ -481,6 +709,72 @@ public struct SelfTestRunner {
             // Test autoConnectOnLaunch toggle
             state.settings.autoConnectOnLaunch = true
             assert(state.settings.autoConnectOnLaunch == true)
+        }
+        
+        test("Обратная совместимость AppSettings при миграции старого settings.json (v1.0 -> v2.0)") {
+            // Старый формат settings.json (v1.0) без полей fragment, noise, launchAtLogin и allowLanConnections
+            let legacyJson = """
+            {
+              "trafficMode": "tun",
+              "routingMode": "rule_based",
+              "socksPort": 10808,
+              "httpPort": 10809,
+              "dnsServer": "https://1.1.1.1/dns-query",
+              "autoConnectOnLaunch": true,
+              "autoUpdateSubscriptions": false,
+              "lastSelectedServerId": "A28B0561-269E-4E4B-97E3-059C1C4F5F5E",
+              "lastSelectedServerName": "Legacy Netherlands Node",
+              "lastSelectedServerKey": "legacy-cache-key"
+            }
+            """
+            
+            guard let data = legacyJson.data(using: .utf8) else {
+                throw ParserError.missingField("Не удалось преобразовать legacyJson в Data")
+            }
+            
+            let decoder = JSONDecoder()
+            let decoded = try decoder.decode(AppSettings.self, from: data)
+            
+            // 1. Проверяем сохранение всех оригинальных значений v1.0
+            assert(decoded.trafficMode == .tun)
+            assert(decoded.routingMode == .ruleBased)
+            assert(decoded.socksPort == 10808)
+            assert(decoded.httpPort == 10809)
+            assert(decoded.dnsServer == "https://1.1.1.1/dns-query")
+            assert(decoded.autoConnectOnLaunch == true)
+            assert(decoded.autoUpdateSubscriptions == false)
+            assert(decoded.lastSelectedServerId == UUID(uuidString: "A28B0561-269E-4E4B-97E3-059C1C4F5F5E"))
+            assert(decoded.lastSelectedServerName == "Legacy Netherlands Node")
+            assert(decoded.lastSelectedServerKey == "legacy-cache-key")
+            
+            // 2. Проверяем корректные безопасные дефолты для новых полей v2.0
+            assert(decoded.launchAtLogin == false, "launchAtLogin должен быть false по умолчанию")
+            assert(decoded.allowLanConnections == false, "allowLanConnections должен быть false по умолчанию")
+            assert(decoded.fragmentEnabled == false, "fragmentEnabled должен быть false по умолчанию")
+            assert(decoded.fragmentPackets == "tlshello", "fragmentPackets по умолчанию 'tlshello'")
+            assert(decoded.fragmentLength == "100-200", "fragmentLength по умолчанию '100-200'")
+            assert(decoded.fragmentInterval == "10-20", "fragmentInterval по умолчанию '10-20'")
+            assert(decoded.noiseEnabled == false, "noiseEnabled должен быть false по умолчанию")
+            assert(decoded.noiseType == "rand", "noiseType по умолчанию 'rand'")
+            assert(decoded.noisePacket == "50-100", "noisePacket по умолчанию '50-100'")
+            assert(decoded.noiseDelay == "10-20", "noiseDelay по умолчанию '10-20'")
+            
+            // 3. Проверяем миграцию, сохранение и roundtrip в новой структуре
+            var migrated = decoded
+            migrated.fragmentEnabled = true
+            migrated.fragmentPackets = "1-3"
+            migrated.noiseEnabled = true
+            migrated.allowLanConnections = true
+            
+            let encoder = JSONEncoder()
+            let migratedData = try encoder.encode(migrated)
+            let roundtrip = try decoder.decode(AppSettings.self, from: migratedData)
+            
+            assert(roundtrip == migrated, "Мигрированные настройки должны совпадать после roundtrip сериализации")
+            assert(roundtrip.fragmentEnabled == true)
+            assert(roundtrip.fragmentPackets == "1-3")
+            assert(roundtrip.noiseEnabled == true)
+            assert(roundtrip.allowLanConnections == true)
         }
         
         // MARK: - 5. Network Stack

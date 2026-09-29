@@ -209,7 +209,17 @@ public struct ServerProfile: Identifiable, Codable, Equatable, Hashable, Sendabl
             }
         }
         str = str.trimmingCharacters(in: .whitespaces)
-        return str.isEmpty ? name : str
+        
+        // Remove trailing expiration/date tags like " | ⌛25-09-2026", " | ⏰25.09.2026", " | 25-09-2026"
+        // so stale dates embedded in server remarks do not confuse the user.
+        let datePattern = #"\s*\|\s*[⌛⏰⏳]?\s*\d{2}[.-]\d{2}[.-]\d{4}\s*$"#
+        if let regex = try? NSRegularExpression(pattern: datePattern) {
+            let range = NSRange(location: 0, length: (str as NSString).length)
+            str = regex.stringByReplacingMatches(in: str, options: [], range: range, withTemplate: "")
+        }
+        
+        let cleaned = str.trimmingCharacters(in: .whitespaces)
+        return cleaned.isEmpty ? name : cleaned
     }
     
     public var protocolDetailsSubtitle: String {

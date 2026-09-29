@@ -4,15 +4,19 @@ import SwiftUI
 /// в точности по визуальному референсу пользователя: капсульный трек и овальный ползунок.
 public struct GoldenToggle: View {
     @Binding public var isOn: Bool
+    public var accentColor: Color?
     public var onToggle: ((Bool) -> Void)?
+    @Environment(\.isEnabled) private var isEnabled: Bool
     
-    public init(isOn: Binding<Bool>, onToggle: ((Bool) -> Void)? = nil) {
+    public init(isOn: Binding<Bool>, accentColor: Color? = nil, onToggle: ((Bool) -> Void)? = nil) {
         self._isOn = isOn
+        self.accentColor = accentColor
         self.onToggle = onToggle
     }
     
     public var body: some View {
         Button(action: {
+            guard isEnabled else { return }
             withAnimation(.spring(response: 0.22, dampingFraction: 0.72)) {
                 isOn.toggle()
             }
@@ -24,7 +28,7 @@ public struct GoldenToggle: View {
                     .fill(
                         isOn
                             ? LinearGradient(
-                                colors: [Color(hex: "F8C010"), Color(hex: "E8B010")],
+                                colors: activeTrackColors,
                                 startPoint: .top,
                                 endPoint: .bottom
                             )
@@ -38,7 +42,7 @@ public struct GoldenToggle: View {
                         Capsule(style: .continuous)
                             .strokeBorder(
                                 isOn
-                                    ? Color(hex: "D89E08").opacity(0.7)
+                                    ? activeStrokeColor
                                     : Color.white.opacity(0.14),
                                 lineWidth: 0.75
                             )
@@ -54,6 +58,21 @@ public struct GoldenToggle: View {
             }
         }
         .buttonStyle(.plain)
+        .opacity(isEnabled ? 1.0 : 0.45)
         .fixedSize()
+    }
+    
+    private var activeTrackColors: [Color] {
+        if let custom = accentColor {
+            return [custom, custom.opacity(0.82)]
+        }
+        return [Color(hex: "F8C010"), Color(hex: "E8B010")]
+    }
+    
+    private var activeStrokeColor: Color {
+        if let custom = accentColor {
+            return custom.opacity(0.7)
+        }
+        return Color(hex: "D89E08").opacity(0.7)
     }
 }

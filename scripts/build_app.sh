@@ -7,6 +7,10 @@ elif [ -d "/Library/Developer/CommandLineTools" ]; then
     export DEVELOPER_DIR="/Library/Developer/CommandLineTools"
 fi
 
+if [ "$1" == "--clean" ] || [ "$1" == "-c" ]; then
+    ./scripts/clean_data.sh
+fi
+
 echo "🔨 Сборка X-project через Swift Package Manager..."
 swift build -c debug
 
@@ -58,9 +62,9 @@ cat << 'EOF' > "$CONTENTS_DIR/Info.plist"
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleShortVersionString</key>
-    <string>1.0.0</string>
+    <string>2.0.0</string>
     <key>CFBundleVersion</key>
-    <string>1</string>
+    <string>2.0.0</string>
     <key>LSMinimumSystemVersion</key>
     <string>14.0</string>
     <key>LSUIElement</key>

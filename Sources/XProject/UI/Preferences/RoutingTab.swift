@@ -14,25 +14,32 @@ public struct RoutingTab: View {
     }
     
     public var body: some View {
-        VStack(spacing: 16) {
-            // MARK: - Routing Mode Selector Card
-            VStack(alignment: .leading, spacing: 10) {
+        ScrollView(.vertical, showsIndicators: true) {
+            VStack(spacing: 12) {
+                // MARK: - Section 1: Geo Databases Card (geosite.dat & geoip.dat)
+                geoDatabaseCard
+                
+                // MARK: - Section 2: Routing Mode Selector Card
+                SettingsCardGroup(
+                    title: "ПРАВИЛА РАЗДЕЛЕНИЯ ТРАФИКА (SPLIT TUNNELING)"
+                ) {
+                // Header action: Happ schemes
                 HStack {
-                    Text("ПРАВИЛА РАЗДЕЛЕНИЯ ТРАФИКА (SPLIT TUNNELING)")
+                    Text("Режим маршрутизации")
                         .font(.system(size: 11, weight: .bold))
-                        .foregroundStyle(.white.opacity(0.6))
+                        .foregroundStyle(.white.opacity(0.55))
                     
                     Spacer()
                     
                     Button(action: { showingHappSchemeSheet = true }) {
                         HStack(spacing: 5) {
                             Image(systemName: "arrow.triangle.2.circlepath")
-                                .font(.system(size: 11, weight: .semibold))
+                                .font(.system(size: 10, weight: .semibold))
                             Text("Схемы Happ (Импорт / Экспорт)")
                                 .font(.system(size: 11, weight: .medium))
                         }
                         .padding(.horizontal, 8)
-                        .padding(.vertical, 4)
+                        .padding(.vertical, 3)
                         .background(
                             RoundedRectangle(cornerRadius: 6, style: .continuous)
                                 .fill(ModernMacTheme.cyanAccent.opacity(0.12))
@@ -43,69 +50,83 @@ public struct RoutingTab: View {
                     .buttonStyle(.plain)
                     .help("Экспорт или импорт схем маршрутизации в формате Happ")
                 }
+                .padding(.horizontal, 12)
+                .padding(.top, 8)
+                .padding(.bottom, 2)
                 
-                HStack(spacing: 10) {
-                    modeButton(
-                        title: "По правилам (Split)",
-                        subtitle: "VPN только для заблокированных сайтов. Российские банки и сервисы работают напрямую.",
-                        icon: "arrow.triangle.branch",
-                        mode: .ruleBased,
-                        badge: "УМНЫЙ"
+                // Rule-based mode row
+                routingModeRow(
+                    mode: .ruleBased,
+                    title: "По правилам (Split Tunneling)",
+                    icon: "arrow.triangle.branch",
+                    badge: "УМНЫЙ",
+                    badgeColor: ModernMacTheme.neonGreen,
+                    info: (
+                        title: "Режим по правилам (Split)",
+                        summary: "Умное разделение сетевого трафика.",
+                        details: "VPN используется только для заблокированных сайтов из списка правил. Российские банки, Госуслуги, маркетплейсы и локальные сервисы работают напрямую на максимальной скорости.",
+                        recommendation: "Рекомендуется для повседневного использования."
                     )
-                    
-                    modeButton(
-                        title: "Глобальный (All Traffic)",
-                        subtitle: "Весь интернет-трафик направляется через VPN без локальных исключений.",
-                        icon: "globe.americas.fill",
-                        mode: .global
+                )
+                
+                Divider().opacity(0.12).padding(.leading, 42)
+                
+                // Global mode row
+                routingModeRow(
+                    mode: .global,
+                    title: "Глобальный (All Traffic)",
+                    icon: "globe.americas.fill",
+                    badge: nil,
+                    badgeColor: .clear,
+                    info: (
+                        title: "Глобальный режим туннелирования",
+                        summary: "Весь интернет-трафик безусловно направляется через VPN.",
+                        details: "Все исходящие соединения всех программ проксируются через выбранный сервер без исключений по IP или доменам.",
+                        recommendation: "Используйте для полной изоляции трафика в публичных Wi-Fi сетях."
                     )
-                }
+                )
             }
-            .padding(14)
-            .background(
-                RoundedRectangle(cornerRadius: 12, style: .continuous)
-                    .fill(Color.white.opacity(0.04))
-                    .overlay(RoundedRectangle(cornerRadius: 12).strokeBorder(Color.white.opacity(0.08), lineWidth: 0.5))
-            )
             
             // MARK: - FakeDNS & Domain Strategy Settings
-            HStack(spacing: 16) {
-                HStack(spacing: 12) {
-                    VStack(alignment: .leading, spacing: 2) {
-                        HStack(spacing: 6) {
-                            Text("FakeDNS пул (198.18.0.0/15)")
-                                .font(.system(size: 12, weight: .semibold))
-                                .foregroundStyle(.white)
-                            
-                            if appState.routingConfig.fakeDnsEnabled {
-                                Text("АКТИВЕН")
-                                    .font(.system(size: 8, weight: .bold))
-                                    .foregroundStyle(.black)
-                                    .padding(.horizontal, 5)
-                                    .padding(.vertical, 1)
-                                    .background(Capsule().fill(ModernMacTheme.neonGreen))
-                            }
-                        }
-                        
-                        Text("Устраняет задержку двойного DNS-запроса при Split Tunneling")
-                            .font(.system(size: 10))
-                            .foregroundStyle(.white.opacity(0.5))
-                    }
-                    
+            SettingsCardGroup {
+                // FakeDNS row
+                SettingsRowView(
+                    icon: "network.badge.shield.half.filled",
+                    iconColor: ModernMacTheme.neonGreen,
+                    title: "FakeDNS пул (198.18.0.0/15)",
+                    badge: appState.routingConfig.fakeDnsEnabled ? "АКТИВЕН" : nil,
+                    badgeColor: ModernMacTheme.neonGreen,
+                    info: (
+                        title: "FakeDNS пул (198.18.0.0/15)",
+                        summary: "Локальный пул виртуальных адресов для ускорения разрешения имен.",
+                        details: "Устраняет задержку двойного DNS-запроса при Split Tunneling, отдавая мгновенный локальный IP для доменов из правил.",
+                        recommendation: "Рекомендуется для мгновенного отклика при открытии сайтов."
+                    )
+                ) {
                     GoldenToggle(isOn: $appState.routingConfig.fakeDnsEnabled) { _ in
                         appState.saveRouting()
                     }
                 }
-                .onChange(of: appState.routingConfig.fakeDnsEnabled) { _, _ in
-                    appState.saveRouting()
-                }
                 
-                Spacer()
+                Divider().opacity(0.12).padding(.leading, 42)
                 
-                HStack(spacing: 6) {
-                    Text("Стратегия:")
-                        .font(.system(size: 11, weight: .medium))
-                        .foregroundStyle(.white.opacity(0.6))
+                // Domain Strategy row
+                HStack(spacing: 10) {
+                    ZStack {
+                        RoundedRectangle(cornerRadius: 6, style: .continuous)
+                            .fill(ModernMacTheme.cyanAccent.opacity(0.15))
+                            .frame(width: 24, height: 24)
+                        
+                        Image(systemName: "point.topleft.down.to.point.bottomright.curvepath")
+                            .font(.system(size: 11, weight: .semibold))
+                            .foregroundStyle(ModernMacTheme.cyanAccent)
+                    }
+                    
+                    Text("Стратегия доменов:")
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundStyle(.white.opacity(0.9))
+                    
+                    Spacer()
                     
                     Picker("", selection: $appState.routingConfig.domainStrategy) {
                         Text("IPIfNonMatch (Авто)").tag("IPIfNonMatch")
@@ -117,40 +138,48 @@ public struct RoutingTab: View {
                     .onChange(of: appState.routingConfig.domainStrategy) { _, _ in
                         appState.saveRouting()
                     }
+                    
+                    InfoPopoverButton(
+                        title: "Стратегия разрешения доменов",
+                        summary: "Алгоритм сопоставления правил маршрутизации в ядре Xray.",
+                        details: "• IPIfNonMatch: проверяет совпадение по домену, а если совпадений нет — резолвит IP для проверки по гео-базе.\n• AsIs: сопоставляет только имя домена как есть без DNS-запроса.\n• IPOnDemand: резолвит IP при первой необходимости.",
+                        recommendation: "IPIfNonMatch является наиболее надежной стратегией."
+                    )
                 }
+                .padding(.horizontal, 12)
+                .padding(.vertical, 8)
+                .frame(minHeight: 38)
             }
-            .padding(.horizontal, 14)
-            .padding(.vertical, 10)
-            .background(
-                RoundedRectangle(cornerRadius: 10, style: .continuous)
-                    .fill(Color.white.opacity(0.03))
-                    .overlay(RoundedRectangle(cornerRadius: 10).strokeBorder(Color.white.opacity(0.06), lineWidth: 0.5))
-            )
             
             if appState.routingConfig.mode == .global {
-                // MARK: - Global Mode Info Banner
-                VStack(spacing: 14) {
-                    Spacer()
-                    Image(systemName: "globe.americas.fill")
-                        .font(.system(size: 48))
-                        .foregroundStyle(ModernMacTheme.cyanAccent)
-                    
-                    Text("Глобальный режим туннелирования")
-                        .font(.system(size: 16, weight: .bold))
-                        .foregroundStyle(.white)
-                    
-                    Text("Все сетевые соединения приложений macOS безусловно проксируются через выбранный сервер без разделения по доменам или IP-адресам.")
-                        .font(.system(size: 13))
-                        .foregroundStyle(.white.opacity(0.7))
-                        .multilineTextAlignment(.center)
-                        .frame(maxWidth: 440)
-                    Spacer()
+                // MARK: - Global Mode Compact Info Card
+                SettingsCardGroup {
+                    HStack(spacing: 12) {
+                        ZStack {
+                            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                                .fill(ModernMacTheme.cyanAccent.opacity(0.15))
+                                .frame(width: 36, height: 36)
+                            
+                            Image(systemName: "globe.americas.fill")
+                                .font(.system(size: 18))
+                                .foregroundStyle(ModernMacTheme.cyanAccent)
+                        }
+                        
+                        VStack(alignment: .leading, spacing: 3) {
+                            Text("Глобальный режим туннелирования (All Traffic)")
+                                .font(.system(size: 12, weight: .semibold))
+                                .foregroundStyle(.white)
+                            
+                            Text("Все сетевые соединения macOS безусловно проксируются через выбранный сервер без разделения по доменам или IP-адресам.")
+                                .font(.system(size: 10))
+                                .foregroundStyle(.white.opacity(0.55))
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                        
+                        Spacer()
+                    }
+                    .padding(12)
                 }
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-                .background(
-                    RoundedRectangle(cornerRadius: 12, style: .continuous)
-                        .fill(Color.white.opacity(0.02))
-                )
             } else {
                 // MARK: - Split Tunneling Rules Management
                 VStack(spacing: 12) {
@@ -274,12 +303,9 @@ public struct RoutingTab: View {
                     quickPresetsBar
                 }
             }
-            
-            // MARK: - Geo Databases Card (geosite.dat & geoip.dat)
-            geoDatabaseCard
         }
-        .padding(18)
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .padding(16)
+        }
         .tint(ModernMacTheme.cyanAccent)
         .sheet(isPresented: $showingHappSchemeSheet) {
             HappSchemeSheetView(appState: appState)
@@ -288,37 +314,36 @@ public struct RoutingTab: View {
     
     // MARK: - Geo Database (geosite.dat / geoip.dat) Card
     private var geoDatabaseCard: some View {
-        VStack(spacing: 8) {
-            HStack(alignment: .center) {
-                // Icon & Titles
-                HStack(spacing: 10) {
-                    ZStack {
-                        RoundedRectangle(cornerRadius: 8, style: .continuous)
-                            .fill(ModernMacTheme.cyanAccent.opacity(0.12))
-                            .frame(width: 32, height: 32)
-                        Image(systemName: "cylinder.split.1x2.fill")
-                            .font(.system(size: 14))
+        SettingsCardGroup {
+            HStack(spacing: 10) {
+                ZStack {
+                    RoundedRectangle(cornerRadius: 6, style: .continuous)
+                        .fill(ModernMacTheme.cyanAccent.opacity(0.15))
+                        .frame(width: 24, height: 24)
+                    
+                    Image(systemName: "cylinder.split.1x2.fill")
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(ModernMacTheme.cyanAccent)
+                }
+                
+                VStack(alignment: .leading, spacing: 2) {
+                    HStack(spacing: 6) {
+                        Text("Базы гео-маршрутизации")
+                            .font(.system(size: 12, weight: .medium))
+                            .foregroundStyle(.white.opacity(0.9))
+                        
+                        Text("DigneZzZ / jsDelivr")
+                            .font(.system(size: 8, weight: .bold, design: .monospaced))
+                            .padding(.horizontal, 5)
+                            .padding(.vertical, 1)
+                            .background(Capsule().fill(ModernMacTheme.cyanAccent.opacity(0.15)))
                             .foregroundStyle(ModernMacTheme.cyanAccent)
                     }
                     
-                    VStack(alignment: .leading, spacing: 2) {
-                        HStack(spacing: 6) {
-                            Text("БАЗЫ ГЕО-МАРШРУТИЗАЦИИ")
-                                .font(.system(size: 11, weight: .bold))
-                                .foregroundStyle(.white)
-                            
-                            Text("DigneZzZ / jsDelivr")
-                                .font(.system(size: 9, weight: .medium))
-                                .foregroundStyle(ModernMacTheme.cyanAccent)
-                                .padding(.horizontal, 5)
-                                .padding(.vertical, 1)
-                                .background(Capsule().fill(ModernMacTheme.cyanAccent.opacity(0.15)))
-                        }
-                        
-                        Text(geoAssetStatusText)
-                            .font(.system(size: 10))
-                            .foregroundStyle(.white.opacity(0.55))
-                    }
+                    Text(geoAssetStatusText)
+                        .font(.system(size: 10))
+                        .foregroundStyle(.white.opacity(0.45))
+                        .lineLimit(1)
                 }
                 
                 Spacer()
@@ -327,25 +352,25 @@ public struct RoutingTab: View {
                 Button(action: {
                     appState.updateGeoAssetsManually()
                 }) {
-                    HStack(spacing: 6) {
+                    HStack(spacing: 5) {
                         if appState.isUpdatingGeoAssets {
                             ProgressView()
                                 .controlSize(.small)
                         } else {
                             Image(systemName: "arrow.clockwise")
-                                .font(.system(size: 11, weight: .semibold))
+                                .font(.system(size: 10, weight: .semibold))
                         }
                         
                         Text(appState.isUpdatingGeoAssets ? "Обновление..." : "Обновить базы")
                             .font(.system(size: 11, weight: .semibold))
                     }
-                    .padding(.horizontal, 10)
-                    .padding(.vertical, 6)
+                    .padding(.horizontal, 9)
+                    .padding(.vertical, 5)
                     .background(
-                        RoundedRectangle(cornerRadius: 7, style: .continuous)
+                        RoundedRectangle(cornerRadius: 6, style: .continuous)
                             .fill(appState.isUpdatingGeoAssets ? Color.white.opacity(0.04) : ModernMacTheme.cyanAccent.opacity(0.15))
                             .overlay(
-                                RoundedRectangle(cornerRadius: 7)
+                                RoundedRectangle(cornerRadius: 6)
                                     .strokeBorder(appState.isUpdatingGeoAssets ? Color.white.opacity(0.1) : ModernMacTheme.cyanAccent.opacity(0.4), lineWidth: 0.5)
                             )
                     )
@@ -353,10 +378,18 @@ public struct RoutingTab: View {
                 }
                 .buttonStyle(.plain)
                 .disabled(appState.isUpdatingGeoAssets)
-                .help("Скачать свежие geosite.dat и geoip.dat из репозитория DigneZzZ через CDN jsDelivr")
+                
+                InfoPopoverButton(
+                    title: "Базы гео-маршрутизации",
+                    summary: "Файлы geosite.dat и geoip.dat для классификации доменов и IP-адресов.",
+                    details: "Используются для правил geosite:category-gov-ru, geoip:ru и других категорий для точного разделения трафика.",
+                    recommendation: "Обновляются автоматически ежедневно при запуске приложения."
+                )
             }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 8)
+            .frame(minHeight: 38)
             
-            // Progress bar and status if update is ongoing
             if appState.isUpdatingGeoAssets {
                 VStack(spacing: 4) {
                     ProgressView(value: appState.geoAssetUpdateProgress, total: 1.0)
@@ -373,16 +406,78 @@ public struct RoutingTab: View {
                             .foregroundStyle(ModernMacTheme.cyanAccent)
                     }
                 }
-                .padding(.top, 2)
+                .padding(.horizontal, 12)
+                .padding(.bottom, 8)
             }
         }
-        .padding(.horizontal, 14)
-        .padding(.vertical, 10)
-        .background(
-            RoundedRectangle(cornerRadius: 10, style: .continuous)
-                .fill(Color.white.opacity(0.03))
-                .overlay(RoundedRectangle(cornerRadius: 10).strokeBorder(Color.white.opacity(0.06), lineWidth: 0.5))
-        )
+    }
+    
+    // MARK: - Routing Mode Row Component
+    private func routingModeRow(
+        mode: ProxyRoutingMode,
+        title: String,
+        icon: String,
+        badge: String?,
+        badgeColor: Color,
+        info: (title: String, summary: String, details: String?, recommendation: String?)
+    ) -> some View {
+        let isSelected = appState.routingConfig.mode == mode
+        return HStack(spacing: 10) {
+            ZStack {
+                RoundedRectangle(cornerRadius: 6, style: .continuous)
+                    .fill(isSelected ? ModernMacTheme.cyanAccent.opacity(0.18) : Color.white.opacity(0.05))
+                    .frame(width: 24, height: 24)
+                
+                Image(systemName: icon)
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(isSelected ? ModernMacTheme.cyanAccent : .white.opacity(0.6))
+            }
+            
+            HStack(spacing: 6) {
+                Text(title)
+                    .font(.system(size: 12, weight: isSelected ? .semibold : .medium))
+                    .foregroundStyle(isSelected ? .white : .white.opacity(0.85))
+                
+                if let badge = badge {
+                    Text(badge)
+                        .font(.system(size: 8, weight: .heavy, design: .monospaced))
+                        .padding(.horizontal, 5)
+                        .padding(.vertical, 1.5)
+                        .background(Capsule().fill(badgeColor.opacity(0.2)))
+                        .foregroundStyle(badgeColor)
+                }
+            }
+            
+            Spacer()
+            
+            // Radio Button matching macOS Reference
+            MacRadioButton(
+                isSelected: isSelected,
+                accentColor: ModernMacTheme.neonYellow
+            ) {
+                withAnimation(ModernMacTheme.smoothSpring) {
+                    appState.routingConfig.mode = mode
+                    appState.saveRouting()
+                }
+            }
+            
+            InfoPopoverButton(
+                title: info.title,
+                summary: info.summary,
+                details: info.details,
+                recommendation: info.recommendation
+            )
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+        .frame(minHeight: 38)
+        .contentShape(Rectangle())
+        .onTapGesture {
+            withAnimation(ModernMacTheme.smoothSpring) {
+                appState.routingConfig.mode = mode
+                appState.saveRouting()
+            }
+        }
     }
     
     private var geoAssetStatusText: String {

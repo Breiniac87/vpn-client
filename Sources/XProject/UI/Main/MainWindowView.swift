@@ -6,6 +6,7 @@ public struct MainWindowView: View {
     
     @State private var showingAddSubscriptionSheet = false
     @State private var showingAddManualSheet = false
+    @State private var editingServer: ServerProfile? = nil
     @State private var collapsedSubscriptionIds = Set<UUID>()
     @State private var isPingingActiveConnection = false
     
@@ -95,6 +96,12 @@ public struct MainWindowView: View {
         .frame(width: 400, height: 720)
         .sheet(isPresented: $showingAddSubscriptionSheet) {
             SubscriptionSheetView(appState: appState)
+        }
+        .sheet(isPresented: $showingAddManualSheet) {
+            ManualServerSheetView(appState: appState)
+        }
+        .sheet(item: $editingServer) { server in
+            ManualServerSheetView(appState: appState, serverToEdit: server)
         }
     }
     
@@ -440,6 +447,9 @@ public struct MainWindowView: View {
                         onPing: {
                             appState.pingServer(id: server.id)
                         },
+                        onEdit: {
+                            editingServer = server
+                        },
                         onDelete: {
                             appState.deleteServer(id: server.id)
                         }
@@ -500,6 +510,9 @@ public struct MainWindowView: View {
                     },
                     onPingServer: { sId in
                         appState.pingServer(id: sId)
+                    },
+                    onEditServer: { s in
+                        editingServer = s
                     },
                     onDeleteServer: { sId in
                         appState.deleteServer(id: sId)
@@ -657,6 +670,7 @@ struct SubscriptionGroupCard: View {
     let onSelectServer: (UUID) -> Void
     let onDoubleClickServer: (UUID) -> Void
     let onPingServer: (UUID) -> Void
+    var onEditServer: ((ServerProfile) -> Void)? = nil
     let onDeleteServer: (UUID) -> Void
     let onDeleteSubscription: () -> Void
     
@@ -805,6 +819,7 @@ struct SubscriptionGroupCard: View {
                             onSelect: { onSelectServer(server.id) },
                             onDoubleClick: { onDoubleClickServer(server.id) },
                             onPing: { onPingServer(server.id) },
+                            onEdit: { onEditServer?(server) },
                             onDelete: { onDeleteServer(server.id) }
                         )
                     }

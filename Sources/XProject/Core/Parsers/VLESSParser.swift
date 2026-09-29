@@ -25,6 +25,9 @@ public struct VLESSParser {
         }
         
         let port = url.port ?? 443
+        guard (1...65535).contains(port) else {
+            throw ParserError.malformedUrl("Недопустимый порт: \(port)")
+        }
         
         // Extract server name from URL fragment with reliable percent decoding
         var name = "\(host):\(port)"

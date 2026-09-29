@@ -23,6 +23,7 @@ public final class XrayProcessManager: @unchecked Sendable {
         server: ServerProfile,
         routing: RoutingConfig,
         settings: AppSettings,
+        servers: [ServerProfile] = [],
         onLog: @escaping @Sendable (LogLevel, String) -> Void,
         onUnexpectedTermination: (@Sendable (Int32) -> Void)? = nil
     ) throws {
@@ -44,7 +45,7 @@ public final class XrayProcessManager: @unchecked Sendable {
         }
         
         // 3. Generate and write config.json
-        let configJson = try XrayConfigGenerator.generateConfig(server: server, routing: routing, settings: settings)
+        let configJson = try XrayConfigGenerator.generateConfig(server: server, routing: routing, settings: settings, servers: servers)
         let configURL = getRunDirectory().appendingPathComponent("config.json")
         try configJson.data(using: .utf8)?.write(to: configURL)
         
@@ -103,13 +104,14 @@ public final class XrayProcessManager: @unchecked Sendable {
     public func testConfiguration(
         server: ServerProfile,
         routing: RoutingConfig,
-        settings: AppSettings
+        settings: AppSettings,
+        servers: [ServerProfile] = []
     ) throws -> (isValid: Bool, output: String) {
         guard let binaryPath = XrayBinaryManager.locateBinary() else {
             return (false, "Бинарный файл xray не найден")
         }
         
-        let configJson = try XrayConfigGenerator.generateConfig(server: server, routing: routing, settings: settings)
+        let configJson = try XrayConfigGenerator.generateConfig(server: server, routing: routing, settings: settings, servers: servers)
         let testConfigURL = getRunDirectory().appendingPathComponent("test_config.json")
         try configJson.data(using: .utf8)?.write(to: testConfigURL)
         

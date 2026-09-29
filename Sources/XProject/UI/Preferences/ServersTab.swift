@@ -5,6 +5,7 @@ public struct ServersTab: View {
     @Bindable var appState: AppState
     @State private var showingAddManualSheet = false
     @State private var showingSubscriptionSheet = false
+    @State private var editingServer: ServerProfile? = nil
     @State private var searchText = ""
     @State private var isPingingAll = false
     
@@ -212,6 +213,9 @@ public struct ServersTab: View {
                             onPing: {
                                 appState.pingServer(id: server.id)
                             },
+                            onEdit: {
+                                editingServer = server
+                            },
                             onDelete: {
                                 withAnimation(ModernMacTheme.smoothSpring) {
                                     appState.deleteServer(id: server.id)
@@ -235,6 +239,12 @@ public struct ServersTab: View {
         .padding(18)
         .sheet(isPresented: $showingSubscriptionSheet) {
             SubscriptionSheetView(appState: appState)
+        }
+        .sheet(isPresented: $showingAddManualSheet) {
+            ManualServerSheetView(appState: appState)
+        }
+        .sheet(item: $editingServer) { server in
+            ManualServerSheetView(appState: appState, serverToEdit: server)
         }
     }
     
@@ -279,6 +289,7 @@ struct ServerRowView: View {
     let onSelect: () -> Void
     let onConnect: () -> Void
     let onPing: () -> Void
+    var onEdit: (() -> Void)? = nil
     let onDelete: () -> Void
     
     @State private var isHovered = false
@@ -311,6 +322,11 @@ struct ServerRowView: View {
             }
             Button(action: copyLink) {
                 Label("Скопировать ссылку", systemImage: "doc.on.doc")
+            }
+            if let onEdit = onEdit {
+                Button(action: onEdit) {
+                    Label("Редактировать...", systemImage: "pencil")
+                }
             }
             Divider()
             Button(role: .destructive, action: onDelete) {
@@ -348,7 +364,7 @@ struct ServerRowView: View {
     private var serverInfo: some View {
         VStack(alignment: .leading, spacing: 2) {
             HStack(spacing: 6) {
-                Text(server.name)
+                Text(server.cleanDisplayName)
                     .font(.system(size: 13, weight: .medium))
                     .foregroundStyle(.primary)
                     .lineLimit(1)
@@ -519,7 +535,19 @@ struct SubscriptionSheetView: View {
                         HStack {
                             VStack(alignment: .leading, spacing: 2) {
                                 Text(sub.name).font(.system(size: 13, weight: .semibold))
-                                Text(sub.urlString).font(.system(size: 11)).foregroundStyle(.secondary)
+                                HStack(spacing: 8) {
+                                    if !sub.formattedExpireDate.isEmpty {
+                                        Text(sub.formattedExpireDate)
+                                            .font(.system(size: 10, weight: .medium))
+                                            .foregroundStyle(ModernMacTheme.cyanAccent)
+                                    }
+                                    if !sub.formattedTraffic.isEmpty {
+                                        Text(sub.formattedTraffic)
+                                            .font(.system(size: 10, design: .monospaced))
+                                            .foregroundStyle(.secondary)
+                                    }
+                                }
+                                Text(sub.urlString).font(.system(size: 10)).foregroundStyle(.secondary)
                             }
                             Spacer()
                             Text("\(sub.serverCount) серв.")
@@ -550,9 +578,9 @@ struct SubscriptionSheetView: View {
         let trimmed = urlText.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
         
-        // Check if this subscription already exists
+        // Check if this subscription already exists by canonical URL, mirror, or custom name
         let existing = appState.subscriptions.first(where: {
-            $0.urlString.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() == trimmed.lowercased()
+            $0.isSameSubscription(as: trimmed, otherName: nameText)
         })
         let subId = existing?.id ?? UUID()
         
@@ -580,51 +608,24 @@ struct SubscriptionSheetView: View {
                         effectiveName = "Подписка #\(appState.subscriptions.count + 1)"
                     }
                     
-                    // Remove old servers for this subscription
-                    appState.servers.removeAll(where: { $0.subscriptionId == subId })
+                    // Centralized upsert strictly prevents duplicate subscriptions and servers
+                    appState.upsertSubscription(
+                        id: subId,
+                        name: effectiveName,
+                        urlString: trimmed,
+                        servers: result.servers,
+                        uploadBytes: result.uploadBytes,
+                        downloadBytes: result.downloadBytes,
+                        totalBytes: result.totalBytes,
+                        expireDate: result.expireDate,
+                        updateIntervalHours: result.updateIntervalHours ?? 6,
+                        suggestedRoutingScheme: result.suggestedRoutingScheme
+                    )
                     
-                    if let idx = appState.subscriptions.firstIndex(where: { $0.id == subId }) {
-                        appState.subscriptions[idx].name = effectiveName
-                        appState.subscriptions[idx].lastUpdated = Date()
-                        appState.subscriptions[idx].serverCount = result.servers.count
-                        appState.subscriptions[idx].uploadBytes = result.uploadBytes
-                        appState.subscriptions[idx].downloadBytes = result.downloadBytes
-                        appState.subscriptions[idx].totalBytes = result.totalBytes
-                        appState.subscriptions[idx].expireDate = result.expireDate
-                        if let h = result.updateIntervalHours {
-                            appState.subscriptions[idx].updateIntervalHours = h
-                        }
-                    } else {
-                        let sub = Subscription(
-                            id: subId,
-                            name: effectiveName,
-                            urlString: trimmed,
-                            lastUpdated: Date(),
-                            serverCount: result.servers.count,
-                            uploadBytes: result.uploadBytes,
-                            downloadBytes: result.downloadBytes,
-                            totalBytes: result.totalBytes,
-                            expireDate: result.expireDate,
-                            updateIntervalHours: result.updateIntervalHours ?? 6
-                        )
-                        appState.subscriptions.append(sub)
-                    }
-                    
-                    for s in result.servers {
-                        appState.addServer(s)
-                    }
-                    
-                    if let scheme = result.suggestedRoutingScheme {
-                        appState.pendingRoutingSuggestion = (subscriptionName: effectiveName, scheme: scheme)
-                    }
-                    
-                    if appState.selectedServerId == nil {
-                        appState.selectedServerId = result.servers.first?.id
-                    }
-                    appState.saveServers()
-                    appState.saveSubscriptions()
                     appState.appendLog(level: .info, message: "Подписка '\(effectiveName)' успешно загружена: \(result.servers.count) серверов")
                     isDownloading = false
+                    nameText = ""
+                    urlText = ""
                     dismiss()
                 }
             } catch {
